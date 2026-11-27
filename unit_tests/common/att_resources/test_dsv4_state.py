@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
+from lightllm.models.deepseek_v4.config import DSV4AttentionConfig, create_swa_config
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionConfig,
     CompressedAttentionState,
@@ -75,7 +75,10 @@ def gather_swa_reference(state: FP8E8M0SlidingWindowState, req_idx: int, length:
 
 def test_compressed_meta_geometry() -> None:
     config = make_config()
-    swa_config = config.create_swa_config()
+    swa_config = create_swa_config(
+        dict(sliding_window=config.sliding_window, head_dim=config.head_dim, qk_rope_head_dim=config.rope_head_dim),
+        config.logical_layer_ids,
+    )
     assert swa_config.kv_bytes == 584 and swa_config.get_packed_kv_bytes(128) // 128 == 585
     for ratio, slot_bytes in ((4, 180), (128, 9)):
         state = make_full(ratio=ratio)

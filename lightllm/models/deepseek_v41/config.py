@@ -1,7 +1,6 @@
 """DeepSeek V4.1 cache layouts and compressor state configuration."""
 
 from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig
-from lightllm.common.attention_state.bounded_att.sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import CompressedAttentionConfig
 
 
@@ -17,22 +16,6 @@ def _validated_layer_ratios(model_config, model_logical_layer_ids, tp_rank, tp_w
     layer_ratios = tuple((layer_id, ratios[layer_id]) for layer_id in model_logical_layer_ids)
     assert all(ratio in (0, 1, 2) for _, ratio in layer_ratios)
     return layer_ratios
-
-
-def create_swa_config(
-    model_config: dict[str, object],
-    model_logical_layer_ids: tuple[int, ...],
-    tp_rank: int = 0,
-    tp_world_size: int = 1,
-) -> FP8E8M0SlidingWindowConfig:
-    return FP8E8M0SlidingWindowConfig(
-        logical_layer_ids=model_logical_layer_ids,
-        window_size=model_config["sliding_window"],
-        kv_dim=model_config["head_dim"],
-        rope_dim=model_config["qk_rope_head_dim"],
-        tp_rank=tp_rank,
-        tp_world_size=tp_world_size,
-    )
 
 
 def create_compressed_configs(

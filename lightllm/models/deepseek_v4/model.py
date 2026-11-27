@@ -146,7 +146,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             create_window_compressor_state,
             create_sliding_window_state,
         )
-        from .config import create_attention_config
+        from .config import create_attention_config, create_swa_config
 
         config = create_attention_config(
             model_config=model_config,
@@ -156,7 +156,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         )
         states = [
             create_sliding_window_state(
-                config=config.create_swa_config(),
+                config=create_swa_config(model_config, model_logical_layer_ids, tp_rank, tp_world_size),
                 request_capacity=request_capacity,
                 mtp_step=args.mtp_step,
                 device=device,
@@ -196,18 +196,17 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return states
 
     def prepare_attention_states(self) -> None:
-        from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState
+        from .config import create_swa_config
 
         super().prepare_attention_states()
-        role_prefix = f"{self.att_state_role}_"
-        # 共享管理器尚未结束注册，直接读取本角色刚注册的 SWA state。
-        (swa_state,) = (
-            state
-            for name, state in vars(self.att_state_manager).items()
-            if name.startswith(role_prefix) and isinstance(state, FP8E8M0SlidingWindowState)
+        swa_config = create_swa_config(
+            self.config,
+            tuple(layer.layer_num_ for layer in self.layers_infer),
+            self.tp_rank_,
+            self.tp_world_size_,
         )
         # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self, swa_state.config)
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self, swa_config)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:

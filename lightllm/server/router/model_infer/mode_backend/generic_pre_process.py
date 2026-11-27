@@ -23,7 +23,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_is_decode_req = []
 
     for req in req_objs:
-        token_lookback.extend(req.get_token_lookback())
+        token_lookback.extend(req.take_token_lookback())
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
         b_req_idx.append(req.req_idx)
@@ -102,7 +102,7 @@ def prepare_decode_inputs(req_objs: List[InferReq]) -> Tuple[ModelInput, List[In
     b_q_seq_len = []
     multimodal_params = []
     for req in req_objs:
-        token_lookback.extend(req.get_token_lookback())
+        token_lookback.extend(req.take_token_lookback())
         run_reqs.append(req)
         b_req_idx.append(req.req_idx)
         seq_len = req.get_cur_total_len()

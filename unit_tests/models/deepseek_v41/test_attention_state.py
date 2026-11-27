@@ -91,20 +91,20 @@ def test_indexer_metadata_uses_c1_and_c2_page_layouts_and_masks_hold_rows(monkey
 
 
 def test_cached_lookback_can_be_collected_after_kv_release(monkeypatch):
-    monkeypatch.setattr(g_infer_context, "engram_lookback_depth", 3)
+    monkeypatch.setattr(g_infer_context, "token_lookback_depth", 3)
     context = InferenceContext()
     req = SimpleNamespace(
         req_idx=2,
         cur_kv_len=5,
         hold_kv_len=5,
-        token_history_ready=False,
+        token_lookback_taken=False,
         get_input_token_ids=lambda: np.arange(8),
         token_index=SimpleNamespace(get_free_token_indexes=lambda start, end: [], reset=lambda: None),
         shm_req=SimpleNamespace(shm_cur_kv_len=5),
     )
-    assert InferReq.get_token_lookback(req) == [(2, 2, 2), (2, 3, 3), (2, 4, 4)]
-    assert not InferReq.get_token_lookback(req)
+    assert InferReq.take_token_lookback(req) == [(2, 2, 2), (2, 3, 3), (2, 4, 4)]
+    assert not InferReq.take_token_lookback(req)
 
     context.free_a_req_mem([], req)
     req.cur_kv_len = 6
-    assert InferReq.get_token_lookback(req) == [(2, 3, 3), (2, 4, 4), (2, 5, 5)]
+    assert InferReq.take_token_lookback(req) == [(2, 3, 3), (2, 4, 4), (2, 5, 5)]

@@ -16,7 +16,7 @@ def _make_prefill_req(req_idx: int, token_num: int):
         get_chuncked_input_token_ids=lambda: input_token_ids,
         get_input_token_ids=lambda: input_token_ids,
         get_cur_total_len=lambda: token_num,
-        get_token_lookback=lambda: (),
+        take_token_lookback=lambda: (),
     )
 
 
@@ -30,7 +30,7 @@ def _make_decode_req(req_idx: int):
         shared_kv_node=None,
         get_cur_total_len=lambda: 4,
         get_radix_cache_shared_len=lambda: 0,
-        get_token_lookback=lambda: (),
+        take_token_lookback=lambda: (),
     )
 
 
@@ -64,10 +64,10 @@ def test_prepare_decode_inputs_allows_empty_batch():
 def test_batch_collects_cached_lookback_once(monkeypatch):
     req = _make_decode_req(req_idx=7)
     req.mtp_step = 2
-    req.token_history_ready = False
+    req.token_lookback_taken = False
     req.get_input_token_ids = lambda: np.arange(4)
-    req.get_token_lookback = lambda: InferReq.get_token_lookback(req)
-    monkeypatch.setattr(g_infer_context, "engram_lookback_depth", 3)
+    req.take_token_lookback = lambda: InferReq.take_token_lookback(req)
+    monkeypatch.setattr(g_infer_context, "token_lookback_depth", 3)
 
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([req])
     assert run_reqs == [req, req, req]
@@ -75,6 +75,24 @@ def test_batch_collects_cached_lookback_once(monkeypatch):
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])
     assert model_input.token_lookback == []
+
+
+def test_uncached_prefill_consumes_lookback_before_next_chunk(monkeypatch):
+    req = _make_prefill_req(req_idx=7, token_num=4)
+    req.token_lookback_taken = False
+    req.get_input_token_ids = lambda: np.arange(4)
+    req.get_chuncked_input_token_ids = lambda: np.arange(3)
+    req.take_token_lookback = lambda: InferReq.take_token_lookback(req)
+    monkeypatch.setattr(g_infer_context, "token_lookback_depth", 3)
+
+    first_input, _ = generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
+    assert first_input.token_lookback == []
+    assert req.token_lookback_taken
+
+    req.cur_kv_len = 3
+    next_input, _ = generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=False)
+    assert next_input.input_ids.tolist() == [3]
+    assert next_input.token_lookback == []
 
 
 def test_overlap_prefill_balances_request_token_load_without_padding():

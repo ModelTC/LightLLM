@@ -248,7 +248,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind, monkeypat
     reserved_layouts = {}
 
     def reserve_owned_workspace(model, swa_config):
-        assert not model.att_state_manager._state_registration_finished
+        assert model.att_state_manager.full_att_allocator is None
         reserved_layouts[model.att_state_role] = swa_config
         return reserve_workspace(model, swa_config)
 
@@ -293,6 +293,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind, monkeypat
         drafts.append(draft)
     manager = main.att_state_manager
     assert all(model.att_state_manager is manager for model in drafts)
+    assert set(reserved_layouts) == {model.att_state_role for model in (main, *drafts)}
     manager.finish_state_registration()
     manager.allocate_storage(token_capacity=8192, page_size=256, big_page_tokens=2048, small_page_capacity=2)
     assert len(manager.get_full_attention_states()) == 2
@@ -300,7 +301,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind, monkeypat
     for model in (main, *drafts):
         states = manager.get_bounded_attention_states(model.att_state_role)
         state = next(item for item in states if isinstance(item, FP8E8M0SlidingWindowState))
-        assert state.config is reserved_layouts[model.att_state_role]
+        assert state.config == reserved_layouts[model.att_state_role]
         model_backend = backend_class(model)
         assert model_backend.swa_config is state.config
         assert state.config.logical_layer_ids == tuple(layer.layer_num_ for layer in model.layers_infer)

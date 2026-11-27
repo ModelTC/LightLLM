@@ -1,7 +1,7 @@
 import torch
 
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_pre_norm
+from lightllm.common.basemodel.triton_kernel.mhc import hc_post, shifted_hc_pre_norm
 from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
 from lightllm.common.quantization.w8a8 import FP8w8a8B128TritonQuantizationMethod
 from .indexer import DeepseekV41IndexInfer
@@ -95,7 +95,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 infer_state.dist_group,
                 text_token_mask=infer_state.input_ids < self.vocab_size if self.has_vision else None,
             ).flatten(1)
-        x, res_mix, post_mix, attn_pre = hc_pre_norm(
+        x, res_mix, post_mix, attn_pre = shifted_hc_pre_norm(
             streams,
             layer_weight.hc_attn_fn_.weight,
             layer_weight.hc_attn_scale_.weight,
@@ -112,7 +112,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
 
     def _hc_ffn_in(self, x, residual, res_mix, post_mix, attn_pre, layer_weight):
         streams = hc_post(x, residual, res_mix, post_mix, streams=self.hc_mult)
-        x, res_mix, post_mix, ffn_pre = hc_pre_norm(
+        x, res_mix, post_mix, ffn_pre = shifted_hc_pre_norm(
             streams,
             layer_weight.hc_ffn_fn_.weight,
             layer_weight.hc_ffn_scale_.weight,

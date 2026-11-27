@@ -5,10 +5,11 @@ from typing import TYPE_CHECKING
 from transformers import PreTrainedTokenizerFast
 
 from lightllm.distributed.communication_op import dist_group_manager
+from lightllm.models.deepseek_v4.config import create_swa_config
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import DeepseekV4EmbeddingAndHeadWeight
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
-from .config import create_compressed_configs, create_compressor_configs, create_swa_config
+from .config import create_compressed_configs, create_compressor_configs
 from .engram import EngramHasher
 from .infer_struct import DeepseekV41InferStateInfo
 from .layer_infer.post_layer_infer import DeepseekV41PostLayerInfer
@@ -91,6 +92,8 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
 
     def _verify_params(self):
         super()._verify_params()
+        if self.args.mtp_mode is not None:
+            raise ValueError("DeepSeek-V4.1 does not support speculative decoding yet")
         if (
             self.enable_tpsp_mix_mode
             or self.args.enable_prefill_microbatch_overlap
@@ -120,7 +123,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         self.engram_hasher = EngramHasher(
             self.config, tokenizer, num_kv_token_slots=allocator.size + allocator.page_size
         )
-        self.engram_lookback_depth = self.engram_hasher.max_ngram_size - 1
+        self.token_lookback_depth = self.engram_hasher.max_ngram_size - 1
         super().init_runtime()
 
     def forward(self, model_input):

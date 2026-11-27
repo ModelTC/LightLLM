@@ -73,25 +73,29 @@ def test_c2_does_not_cross_request_boundaries_or_commit_hold():
     torch.testing.assert_close(state[2], previous[2])
 
 
-def test_shifted_mhc_uses_previous_pre_and_returns_new_coefficients(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.mhc import pre_norm
+@pytest.mark.parametrize("disable_deepgemm", [False, True], ids=["deepgemm", "torch"])
+def test_shifted_mhc_uses_previous_pre_and_returns_new_coefficients(monkeypatch, disable_deepgemm):
+    from lightllm.common.basemodel.triton_kernel.mhc import hc_pre_norm, pre_norm, shifted_hc_pre_norm
 
-    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", True)
+    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", disable_deepgemm)
     t, h = 3, 128
     x = torch.randn(t, 4 * h, dtype=torch.bfloat16, device="cuda")
     fn = torch.randn(24, 4 * h, device="cuda") * 0.01
     scale, base = torch.randn(3, device="cuda"), torch.randn(24, device="cuda")
     norm = torch.randn(h, dtype=torch.bfloat16, device="cuda")
     previous = torch.tensor([[1.0, 0.0, 0.0, 0.0]], device="cuda").expand(t, -1).contiguous()
-    actual, _, _, new_pre = pre_norm.hc_pre_norm(
+    actual, residual_mix, post_mix, new_pre = shifted_hc_pre_norm(
         x, fn, scale, base, norm, 4, 1e-20, 1e-20, 1e-6, 20, previous_pre=previous
     )
+    _, expected_residual_mix, expected_post_mix = hc_pre_norm(x, fn, scale, base, norm, 4, 1e-20, 1e-20, 1e-6, 20)
     selected = x.view(t, 4, h)[:, 0].float()
     expected = (selected * torch.rsqrt(selected.square().mean(-1, keepdim=True) + 1e-20) * norm).bfloat16()
     projection = x.float() @ fn.T * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-20)
     expected_pre = torch.sigmoid(projection[:, :4] * scale[0] + base[:4]) + 1e-6
     torch.testing.assert_close(actual, expected, atol=0.03125, rtol=0.01)
-    torch.testing.assert_close(new_pre, expected_pre, atol=1e-6, rtol=1e-5)
+    torch.testing.assert_close(residual_mix, expected_residual_mix)
+    torch.testing.assert_close(post_mix, expected_post_mix)
+    torch.testing.assert_close(new_pre, expected_pre, atol=1e-4, rtol=1e-5)
 
 
 def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypatch):

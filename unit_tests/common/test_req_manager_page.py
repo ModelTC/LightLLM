@@ -186,7 +186,7 @@ def _make_scheduler_req(manager, req_idx, current, total):
         finish_status=SimpleNamespace(is_finished=lambda: False),
         is_slave_req=lambda: False,
         get_cur_total_len=total,
-        get_token_lookback=lambda: (),
+        take_token_lookback=lambda: (),
         get_chuncked_input_token_len=total,
     )
     _attach_token_index(manager, req)
