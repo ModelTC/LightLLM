@@ -466,6 +466,15 @@ class TpPartBaseModel:
 
         infer_state.init_some_extra_state(self)
         if build_attention and self.attention_backend_manager.has_attention(infer_state.att_state_role):
+            infer_state.page_size = self.args.page_size
+            infer_state.model_max_seq_len = self.max_seq_length
+            infer_state.max_cuda_graph_batch_size = self.graph_max_batch_size
+            # Include all verification rows, TPSP padding and the largest captured batch.
+            max_decode_rows = self.args.running_max_req_size * (self.args.mtp_step + 1)
+            if self.args.enable_tpsp_mix_mode:
+                max_decode_rows = triton.cdiv(max_decode_rows, self.tp_world_size_) * self.tp_world_size_
+            infer_state.max_decode_rows = max(max_decode_rows, self.graph_max_batch_size)
+            infer_state.diverse_decode = self.args.diverse_mode
             if infer_state.uses_cuda_graph:
                 if self.graph_max_len_in_batch is None:
                     raise ValueError(f"a {graph_mode.value} step needs the CUDA graph kv length capacity")

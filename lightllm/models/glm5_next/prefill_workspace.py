@@ -8,7 +8,6 @@ to sparse prefill layers through their model.
 import torch
 import triton
 
-from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
 
 # Cap each microbatch's BF16 KV workspace at 2 GiB (2097152 × 512 × 2 bytes).
 KV_GATHER_CHUNK_SIZE = 2097152
@@ -38,18 +37,26 @@ def reserve_fp8_sparse_prefill_workspaces(model) -> list[dict[str, torch.Tensor]
     if model.args.run_mode == "decode":
         kv_token_capacity = min(kv_token_capacity, q_token_capacity)
     # Query offsets of one-token requests; read-only, so every region and model reads a prefix of one arange.
-    cu_seqlens_q = get_gpu_workspace_buffer("glm5_fp8_prefill_cu_q", q_token_capacity + 1, torch.int32)
+    cu_seqlens_q = model.attention_backend_manager.get_workspace(
+        "glm5_fp8_prefill_cu_q", q_token_capacity + 1, torch.int32
+    )
     cu_seqlens_q.copy_(torch.arange(q_token_capacity + 1, dtype=torch.int32, device=cu_seqlens_q.device))
     workspaces = []
     for region in range(regions):
         name = f"glm5_fp8_prefill_{region}"
-        gathered_kv = get_gpu_workspace_buffer(f"{name}_kv", kv_token_capacity * 512, torch.bfloat16)
-        chunk_topk_indices = get_gpu_workspace_buffer(f"{name}_topk", q_token_capacity * topk_size, torch.int32)
+        gathered_kv = model.attention_backend_manager.get_workspace(
+            f"{name}_kv", kv_token_capacity * 512, torch.bfloat16
+        )
+        chunk_topk_indices = model.attention_backend_manager.get_workspace(
+            f"{name}_topk", q_token_capacity * topk_size, torch.int32
+        )
         workspaces.append(
             {
                 "gathered_kv": gathered_kv.view(kv_token_capacity, 1, 512),
                 "chunk_topk_indices": chunk_topk_indices.view(q_token_capacity, topk_size),
-                "chunk_cache_seqlens": get_gpu_workspace_buffer(f"{name}_seqlens", q_token_capacity, torch.int32),
+                "chunk_cache_seqlens": model.attention_backend_manager.get_workspace(
+                    f"{name}_seqlens", q_token_capacity, torch.int32
+                ),
                 "cu_seqlens_q": cu_seqlens_q,
             }
         )

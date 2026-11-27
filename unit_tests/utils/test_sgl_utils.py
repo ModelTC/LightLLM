@@ -117,9 +117,9 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     layer_config = GQALayerConfig(num_heads=4, num_kv_heads=2, head_dim=8, dtype=torch.bfloat16)
     impl = FA3GQADecodeBackend(layer_config)
     impl.page_size = page_size
-    impl.resources = SimpleNamespace(
-        max_decode_rows=2,
-        max_seq_len=graph_capacity,
+    infer_state.max_decode_rows = 2
+    infer_state.model_max_seq_len = graph_capacity
+    infer_state.attention_backend_manager = SimpleNamespace(
         get_workspace=lambda name, numel, dtype: torch.zeros(numel, dtype=dtype),
     )
     copy_calls = []

@@ -121,7 +121,7 @@ def test_gdn_decode_keeps_logical_layer_state(
 
     def build_attention_states(backend):
         # The attention state the layers' group prepares for this step.
-        infer.att_states = {backend.state_key: backend.create_att_state(infer, None)}
+        infer.att_states = {backend.state_key: backend.create_att_state(infer)}
 
     if device == "cuda":
         infer.b1_cu_q_seq_len = torch.tensor([0, 5], device=device, dtype=torch.int32)

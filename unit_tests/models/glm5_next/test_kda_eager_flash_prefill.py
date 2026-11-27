@@ -120,7 +120,7 @@ def _prefill(layer, requested, hidden, layer_weight, conv0, ssm0, *, graph=False
     backend = selector.select(spec.prefill, "prefill", requested)
     infer.attention_backend_manager = SimpleNamespace(get_backend=lambda role, phase, layer_id: backend)
     # The attention state the layer's group prepares for this step.
-    att_state = backend.create_att_state(infer, None)
+    att_state = backend.create_att_state(infer)
     infer.att_states = {backend.state_key: att_state}
     assert (att_state.flash_kda_fwd is not None) == (requested == "flashkda")
     if graph:

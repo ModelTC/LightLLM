@@ -4,9 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 import torch.nn.functional as F
 
-from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 from lightllm.common.attention.backends.gqa import GQAKVScales, GQALayerConfig, GQALayerInputs
 from lightllm.common.attention.backends.gqa.flashinfer import FlashInferGQADecodeBackend, FlashInferGQAPrefillBackend
 from unit_tests.common.attention.backends.groups_runner import GroupsRunner
@@ -15,7 +17,10 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 
 flashinfer = pytest.importorskip("flashinfer")
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+pytestmark = [
+    pytest.mark.usefixtures("runtime_start_args"),
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+]
 
 
 def reference(q, k, v, token_map, req_ids, lengths, ready):
@@ -74,11 +79,15 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     kv = torch.randn(3 * 512, 2 * kv_heads, 64, device="cuda", dtype=dtype)
     k, v = kv[:, :kv_heads], kv[:, kv_heads:]
     before, q_before = kv.clone(), q.clone()
-    resources = make_resources(page_size=page_size, max_cuda_graph_batch_size=3)
+    batch_fields = dict(
+        attention_backend_manager=AttentionBackendManager(), page_size=page_size, max_cuda_graph_batch_size=3
+    )
     layer_config = GQALayerConfig(num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=dtype)
 
     backend = FlashInferGQAPrefillBackend(layer_config)
-    att_state = backend.create_att_state(make_batch(token_map, req_ids, lengths, query_lengths), resources)
+    att_state = backend.create_att_state(
+        make_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
+    )
     assert att_state.page_size == page_size
     out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
@@ -88,7 +97,7 @@ def test_prefill_decode(dtype, q_heads, kv_heads, page_size, cached):
     torch.testing.assert_close(q, q_before, atol=0, rtol=0)
 
     backend = FlashInferGQADecodeBackend(layer_config)
-    att_state = backend.create_att_state(make_batch(token_map, req_ids, lengths), resources)
+    att_state = backend.create_att_state(make_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields))
     q = torch.randn(3, q_heads, 64, device="cuda", dtype=dtype)
     out = torch.empty_like(q)
     assert backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v), out=out) is out
@@ -112,7 +121,9 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
     k, v = encoded[:, 0].view(torch.uint8), encoded[:, 1].view(torch.uint8)
     k_ref, v_ref = encoded[:, 0].float() * k_scale, encoded[:, 1].float() * v_scale
     # The cache's pages hold page_size slots; FP8 FlashInfer runs with single-token pages.
-    resources = make_resources(page_size=page_size, max_cuda_graph_batch_size=3)
+    batch_fields = dict(
+        attention_backend_manager=AttentionBackendManager(), page_size=page_size, max_cuda_graph_batch_size=3
+    )
     layer_config = GQALayerConfig(
         num_heads=q_heads, num_kv_heads=kv_heads, head_dim=64, dtype=torch.bfloat16, kv_quant="fp8_per_tensor"
     )
@@ -121,7 +132,9 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
     query_lengths = [n - r for n, r in zip(lengths, ready)]
     q = torch.randn(sum(query_lengths), q_heads, 64, device="cuda", generator=generator).bfloat16()
     backend = FlashInferGQAPrefillBackend(layer_config)
-    att_state = backend.create_att_state(make_batch(token_map, req_ids, lengths, query_lengths), resources)
+    att_state = backend.create_att_state(
+        make_infer_state(make_batch(token_map, req_ids, lengths, query_lengths), **batch_fields)
+    )
     assert att_state.page_size == 1
     out = torch.empty_like(q)
     backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
@@ -129,7 +142,7 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
     torch.testing.assert_close(out.float(), expected, atol=0.02, rtol=0.02)
 
     backend = FlashInferGQADecodeBackend(layer_config)
-    att_state = backend.create_att_state(make_batch(token_map, req_ids, lengths), resources)
+    att_state = backend.create_att_state(make_infer_state(make_batch(token_map, req_ids, lengths), **batch_fields))
     q = torch.randn(3, q_heads, 64, device="cuda", generator=generator).bfloat16()
     out = torch.empty_like(q)
     backend.forward(att_state, GQALayerInputs(q=q, k_cache=k, v_cache=v, kv_scales=scales), out=out)
@@ -140,10 +153,12 @@ def test_fp8_prefill_decode(q_heads, kv_heads, page_size):
 def test_decode_keeps_one_graph_wrapper_per_microbatch_and_batch_size():
     token_map = paged_token_map(2, 16, seed=1)
     backend = FlashInferGQADecodeBackend(GQALayerConfig(num_heads=8, num_kv_heads=2, head_dim=64, dtype=torch.bfloat16))
-    resources = make_resources(page_size=16, max_cuda_graph_batch_size=2)
+    batch_fields = dict(attention_backend_manager=AttentionBackendManager(), page_size=16, max_cuda_graph_batch_size=2)
 
     def wrapper(*args, **kwargs):
-        return backend.create_att_state(make_batch(token_map, *args, **kwargs), resources).wrapper
+        return backend.create_att_state(
+            make_infer_state(make_batch(token_map, *args, **kwargs), **batch_fields)
+        ).wrapper
 
     captured = wrapper([0, 1], [33, 17], graph_capacity=512)
     assert wrapper([0, 1], [300, 257], graph_capacity=512) is captured

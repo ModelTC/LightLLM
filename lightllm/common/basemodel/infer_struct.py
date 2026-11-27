@@ -65,6 +65,12 @@ class InferStateInfo:
         # 本步的执行方式：eager、捕获 decode CUDA Graph，或为回放准备输入。
         self.graph_mode: GraphMode = GraphMode.EAGER
         self.cuda_graph_max_kv_seq_len: Optional[int] = None
+        # Model capacities stay fixed across steps, including capture and replay.
+        self.page_size: int = None
+        self.model_max_seq_len: int = None
+        self.max_cuda_graph_batch_size: int = None
+        self.max_decode_rows: int = None
+        self.diverse_decode: bool = False
         self.decode_rows_per_request: int = 1
         self.dynamic_decode_rows: bool = False
         self.req_to_mtp_state_index: Optional[torch.Tensor] = None

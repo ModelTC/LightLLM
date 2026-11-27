@@ -10,8 +10,6 @@ from dataclasses import dataclass
 import torch
 import triton
 
-from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
-
 
 @dataclass
 class SwaPrefillWorkspace:
@@ -57,9 +55,9 @@ def reserve_swa_prefill_workspace(model):
     layer_count = len(config.logical_layer_ids)
     # Named by the per-layer layout rather than the model role: main and draft models prefill one after
     # the other, so a draft whose layers have this layout reuses the main model's first layers.
-    buffer = get_gpu_workspace_buffer(
-        key_name=f"deepseek_v4_swa_prefill_{token_num}x{slot_bytes}",
-        workspace_size=layer_count * token_num * slot_bytes,
+    buffer = model.attention_backend_manager.get_workspace(
+        name=f"deepseek_v4_swa_prefill_{token_num}x{slot_bytes}",
+        numel=layer_count * token_num * slot_bytes,
         dtype=torch.uint8,
     )
     return buffer.view(layer_count, token_num, slot_bytes), capacity

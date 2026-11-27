@@ -13,10 +13,10 @@ from lightllm.common.basemodel.attention_backend_manager import (
 )
 
 
-def set_up(backend_cls, layer_config, resources):
-    """A backend for layer_config whose storage is set up from resources, as its first create_att_state does."""
+def init_backend(backend_cls, layer_config, infer_state):
+    """A backend for layer_config whose storage is set up from the step, as its first create_att_state does."""
     backend = backend_cls(layer_config)
-    backend.setup(resources)
+    backend.init_runtime(infer_state)
     return backend
 
 
@@ -43,6 +43,15 @@ class GroupsRunner:
         )
 
     def step(self, infer_state) -> None:
+        model = self.model
+        infer_state.attention_backend_manager = model.attention_backend_manager
+        infer_state.page_size = model.args.page_size
+        infer_state.model_max_seq_len = model.max_seq_length
+        infer_state.max_cuda_graph_batch_size = model.graph_max_batch_size
+        infer_state.max_decode_rows = max(
+            model.args.running_max_req_size * (model.args.mtp_step + 1), model.graph_max_batch_size
+        )
+        infer_state.diverse_decode = model.args.diverse_mode
         infer_state.att_states = self.model.attention_backend_manager.create_att_state(infer_state)
 
     def run_gqa(
@@ -66,12 +75,11 @@ class LayerAttention:
     """One layer's attention outside a model: backends selected by name as a model selects them, each
     preparing attention state from an InferStateInfo as its state group would."""
 
-    def __init__(self, prefill_config: Any, decode_config: Any, name: str, ctx=None) -> None:
+    def __init__(self, prefill_config: Any, decode_config: Any, name: str) -> None:
         from lightllm.common.attention import selector
 
         configs = {"prefill": prefill_config, "decode": decode_config}
         self.backends = {phase: selector.select(config, phase, name) for phase, config in configs.items()}
-        self.ctx = ctx
 
     def backend_name(self, phase: str) -> str:
         return self.backends[phase].name
@@ -79,7 +87,7 @@ class LayerAttention:
     def att_state(self, infer_state) -> Any:
         """Build attention state from the microbatch's prepared inputs."""
         phase = "prefill" if infer_state.is_prefill else "decode"
-        return self.backends[phase].create_att_state(infer_state, self.ctx)
+        return self.backends[phase].create_att_state(infer_state)
 
     def run(self, phase: str, att_state, layer_inputs, *, out: torch.Tensor, alloc_func=torch.empty) -> torch.Tensor:
         return self.backends[phase].forward(att_state, layer_inputs, out=out, alloc_func=alloc_func)

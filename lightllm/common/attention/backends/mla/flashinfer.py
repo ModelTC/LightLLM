@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 import triton
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from .. import set_flashinfer_envs
 from . import (
     MLADecodeLayerConfig,
@@ -54,9 +54,11 @@ class FlashInferMLAPrefillBackend(
         # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         set_flashinfer_envs()
-        self.workspace = resources.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)
+        self.workspace = infer_state.attention_backend_manager.get_workspace(
+            "flashinfer_mla", _WORKSPACE_BYTES, torch.int8
+        )
 
     def build(self, infer_state: InferStateInfo) -> "BatchPrefillWithRaggedKVCacheWrapper":
         """Plan a fresh wrapper for the step's query and kv offsets."""
@@ -107,15 +109,19 @@ class FlashInferMLADecodeBackend(
         # FlashInfer plans with every field but causal, which the backend requires.
         return layer_config
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""
         set_flashinfer_envs()
-        self.workspace = resources.get_workspace("flashinfer_mla", _WORKSPACE_BYTES, torch.int8)
-        self.page_size = resources.page_size
-        self.max_pages_per_request = triton.cdiv(resources.max_seq_len, self.page_size)
-        self.max_batch_size = resources.max_cuda_graph_batch_size
+        self.workspace = infer_state.attention_backend_manager.get_workspace(
+            "flashinfer_mla", _WORKSPACE_BYTES, torch.int8
+        )
+        self.page_size = infer_state.page_size
+        self.max_pages_per_request = triton.cdiv(infer_state.model_max_seq_len, self.page_size)
+        self.max_batch_size = infer_state.max_cuda_graph_batch_size
         numel = self.max_batch_size * self.max_pages_per_request
-        self._kv_indices = [torch.empty(numel, dtype=torch.int32, device=resources.device) for _ in range(2)]
+        self._kv_indices = [
+            torch.empty(numel, dtype=torch.int32, device=infer_state.b_seq_len.device) for _ in range(2)
+        ]
         self._graph_wrappers: dict[tuple[int, int], "BatchMLAPagedAttentionWrapper"] = {}
 
     def build(self, infer_state: InferStateInfo) -> FlashInferMLADecodeAttState:

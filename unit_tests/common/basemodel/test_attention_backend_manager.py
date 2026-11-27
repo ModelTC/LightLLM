@@ -15,7 +15,7 @@ from lightllm.common.basemodel.attention_backend_manager import (
 )
 from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from unit_tests.common.attention.backends.groups_runner import set_up
+from unit_tests.common.attention.backends.groups_runner import init_backend
 
 
 def start_args(**overrides):
@@ -69,10 +69,6 @@ def registered(model, manager=None):
     return model.attention_backend_manager
 
 
-def resources(model):
-    return registered(model).resources[model.att_state_role]
-
-
 def register(model, *configs):
     """Register one layer per LayerAttentionConfig and return each layer's (prefill, decode) backends."""
     model.layers_infer = [ConfigLayer(i, config) for i, config in enumerate(configs)]
@@ -104,9 +100,9 @@ def test_triton_layers_share_one_group_across_layer_configs(monkeypatch):
     prepared_by = []
     create_att_state = AttentionBackend.create_att_state
 
-    def record_create_att_state(self, infer_state, resources):
+    def record_create_att_state(self, infer_state):
         prepared_by.append(self)
-        return create_att_state(self, infer_state, resources)
+        return create_att_state(self, infer_state)
 
     monkeypatch.setattr(AttentionBackend, "create_att_state", record_create_att_state)
     for is_prefill, representative, other in zip((True, False), sliding, full):
@@ -208,7 +204,7 @@ def test_kda_prefill_step_builders_follow_the_layer_config(monkeypatch, replay, 
         prefill_kernel=prefill_kernel,
     )
     backend = kda_triton.ReplayKDAPrefillBackend if replay else kda_triton.TritonKDAPrefillBackend
-    backend = set_up(backend, config, resources(fake_model()))
+    backend = init_backend(backend, config, step(prefill=True))
     assert requests == [(prefill_kernel, {"dtype": torch.bfloat16, "ssm_dtype": torch.bfloat16})]
     assert backend.flash_kda_fwd == "fwd" and backend.max_flash_len == flash_len
     req = torch.tensor([0, 1, 2])
@@ -255,7 +251,7 @@ def fake_backend(backend_name, *, sync=False):
         name = backend_name
         phase = backend_name.rsplit("_", 1)[1]
 
-        def setup(self, resources):
+        def init_runtime(self, infer_state):
             created.append((backend_name, self.state_key[1]))
             self.builder = FakeBuilder(backend_name)
 
@@ -434,20 +430,6 @@ def test_kv_quant_fields_reject_mismatched_caches():
         gqa_kv_quant_fields("fp8kv_dsa", None, head_dim=64)
 
 
-def test_step_builder_context_covers_speculative_and_padded_decode_rows():
-    model = fake_model(mtp_step=2, enable_tpsp_mix_mode=True, enable_decode_microbatch_overlap=True, diverse_mode=True)
-    model.tp_world_size_ = 4
-    ctx = resources(model)
-    # 8 running requests x 3 rows, padded to a multiple of the TP size.
-    assert ctx.max_decode_rows == 24
-    assert ctx.max_cuda_graph_batch_size == 4
-    assert ctx.microbatch_count == 2
-    assert ctx.workspace_bytes == 64 * 1024 * 1024
-    assert ctx.diverse_decode
-    model.graph_max_batch_size = 64
-    assert resources(model).max_decode_rows == 64
-
-
 def test_fa3_decode_page_tables_allocate_lazily_per_microbatch_and_check_capacity(monkeypatch):
     from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend
     from lightllm.common.basemodel.triton_kernel import fa3_utils
@@ -459,13 +441,18 @@ def test_fa3_decode_page_tables_allocate_lazily_per_microbatch_and_check_capacit
         return torch.zeros(numel, dtype=dtype)
 
     monkeypatch.setattr(fa3_utils, "page_table_copy", lambda **kwargs: None)
-    ctx = resources(fake_model(enable_decode_microbatch_overlap=True))
-    ctx = type(ctx)(**{**vars(ctx), "get_workspace": get_workspace})
-    backend = set_up(FA3GQADecodeBackend, gqa(), ctx)
+    ctx = step(prefill=False)
+    ctx.page_size, ctx.model_max_seq_len, ctx.max_decode_rows, ctx.max_cuda_graph_batch_size = 16, 1024, 8, 4
+    manager = AttentionBackendManager()
+    monkeypatch.setattr(manager, "get_workspace", get_workspace)
+    backend = init_backend(FA3GQADecodeBackend, gqa(), ctx)
     assert requests == []
 
     def decode_step(rows, max_kv_len, microbatch_index):
         state = step(prefill=False, batch_size=rows)
+        state.attention_backend_manager = manager
+        state.model_max_seq_len = ctx.model_max_seq_len
+        state.max_decode_rows = ctx.max_decode_rows
         state.microbatch_index = microbatch_index
         state.max_kv_seq_len = max_kv_len
         state.b_seq_len.fill_(max_kv_len)
@@ -481,7 +468,7 @@ def test_fa3_decode_page_tables_allocate_lazily_per_microbatch_and_check_capacit
     with pytest.raises(RuntimeError, match="batch size"):
         backend.build(decode_step(rows=rows + 1, max_kv_len=16, microbatch_index=0))
     with pytest.raises(RuntimeError, match="max KV sequence length"):
-        backend.build(decode_step(rows=1, max_kv_len=ctx.max_seq_len + 1, microbatch_index=0))
+        backend.build(decode_step(rows=1, max_kv_len=ctx.model_max_seq_len + 1, microbatch_index=0))
 
 
 class FakeState:

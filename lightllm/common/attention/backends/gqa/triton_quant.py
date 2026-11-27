@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from . import GQALayerConfig, GQALayerInputs
 
 if TYPE_CHECKING:
@@ -162,7 +162,7 @@ class TritonQuantGQAPrefillBackend(AttentionBackend[GQALayerConfig, TritonQuantG
 class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQADecodeAttState, GQALayerInputs]):
     name = "triton_quant_gqa_decode"
     phase = "decode"
-    # Whether build prepares the shared-prefix groups of the int8 diverse-sampling kernel; set by setup.
+    # Whether build prepares the shared-prefix groups of the int8 diverse-sampling kernel; set by init_runtime.
     diverse = False
 
     @classmethod
@@ -173,9 +173,9 @@ class TritonQuantGQADecodeBackend(AttentionBackend[GQALayerConfig, TritonQuantGQ
     def group_key(cls, layer_config: GQALayerConfig):
         return layer_config.kv_quant
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         # Only the int8 decode kernel has a diverse-sampling variant.
-        self.diverse = resources.diverse_decode and self.layer_config.kv_quant == "int8_group"
+        self.diverse = infer_state.diverse_decode and self.layer_config.kv_quant == "int8_group"
 
     def build(self, infer_state: InferStateInfo) -> TritonQuantGQADecodeAttState:
         """A CUDA graph step bounds lengths by the graph capacity and keeps the group tensors per

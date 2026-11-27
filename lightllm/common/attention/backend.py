@@ -19,9 +19,8 @@ before attention and passes the attention state explicitly rather than through a
 
 import enum
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Callable, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import torch
 
@@ -56,33 +55,6 @@ class TensorAllocator(Protocol):
         ...
 
 
-@dataclass(frozen=True)
-class AttentionBuildResources:
-    """Model-wide capacities and workspace access used to set up a backend's storage."""
-
-    # CUDA device index of the step's tensors.
-    device: int
-    # Cache slots per page of the KV cache; slot s lies on page s // page_size.
-    page_size: int
-    # The longest request in tokens, including any speculative-decoding headroom.
-    max_seq_len: int
-    # Decode rows of the largest CUDA graph step.
-    max_cuda_graph_batch_size: int
-    # Decode rows any step may have (running requests times rows per request, padded as the
-    # model pads its batches); at least max_cuda_graph_batch_size.
-    max_decode_rows: int
-    # Concurrent steps of microbatch overlap; InferStateInfo.microbatch_index is below it.
-    microbatch_count: int
-    # Size of the scratch workspace that implementations needing one share by name.
-    workspace_bytes: int
-    # get_workspace(name, numel, dtype) returns process-wide storage on device, the same
-    # tensor for the same arguments, so backends of one implementation share it.
-    get_workspace: Callable[[str, int, torch.dtype], torch.Tensor]
-    # Decode batches carry the shared-prefix groups of diverse sampling
-    # (InferStateInfo.b_shared_seq_len and b_shared_radix_node_id).
-    diverse_decode: bool = False
-
-
 class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     """Prepare shared state once per step and run attention with each layer's operands."""
 
@@ -96,7 +68,7 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     def __init__(self, layer_config: LayerConfig) -> None:
         self._check_supported(layer_config)
         self.layer_config = layer_config
-        self._is_set_up = False
+        self._runtime_initialized = False
         # Tensors CUDA graphs read, kept at fixed addresses per (microbatch, batch size, name).
         self._graph_tensors: dict[tuple, torch.Tensor] = {}
 
@@ -106,22 +78,22 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
 
     @classmethod
     def group_key(cls, layer_config: LayerConfig) -> Any:
-        """The layer config fields that setup and build read; layers with equal keys share one state."""
+        """The layer config fields that init_runtime and build read; layers with equal keys share one state."""
         return None
 
     @cached_property
     def state_key(self) -> tuple:
         return type(self), self.group_key(self.layer_config)
 
-    def create_att_state(self, infer_state: "InferStateInfo", resources: AttentionBuildResources) -> AttState:
+    def create_att_state(self, infer_state: "InferStateInfo") -> AttState:
         """Create this phase's shared state for one microbatch, setting up storage on first use."""
-        if not self._is_set_up:
-            self.setup(resources)
-            self._is_set_up = True
+        if not self._runtime_initialized:
+            self.init_runtime(infer_state)
+            self._runtime_initialized = True
         return self.build(infer_state)
 
-    def setup(self, resources: AttentionBuildResources) -> None:
-        """Size the storage build uses from model-wide resources; called once before the first build."""
+    def init_runtime(self, infer_state: "InferStateInfo") -> None:
+        """Initialize storage on first use; retain needed values and buffers, never the step itself."""
 
     @abstractmethod
     def build(self, infer_state: "InferStateInfo") -> AttState:

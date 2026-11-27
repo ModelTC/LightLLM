@@ -7,6 +7,7 @@ import torch
 import triton
 
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.common.attention.backends.sparse_mla.flashmla import (
     FlashMLASparseDecodeBackend,
     FlashMLASparseDecodeAttState,
@@ -151,6 +152,7 @@ def _make_workspace_backend(batch_max_tokens, overlap=False):
         max_seq_length=prefill_workspace.KV_GATHER_CHUNK_SIZE,
         graph_max_len_in_batch=prefill_workspace.KV_GATHER_CHUNK_SIZE,
         att_state_role="unit_test",
+        attention_backend_manager=AttentionBackendManager(),
         args=SimpleNamespace(enable_prefill_microbatch_overlap=overlap, run_mode="normal"),
     )
     return _Fp8SparseAttention(model)
@@ -312,11 +314,11 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     attention.register_backends(model)
     role = model.att_state_role
     assert attention.get_backend(role, "decode", 0).layer_config.causal is False
-    # The backends can be set up from the layer config and the model's resources.
+    # Sparse backends need no model capacities during init_runtime.
     for phase, name in zip(("prefill", "decode"), expected):
         (group,) = attention.state_groups[role][phase].values()
         assert group.name == name
-        attention.get_backend(role, phase, 0).setup(attention.resources[role])
+        attention.get_backend(role, phase, 0).init_runtime(InferStateInfo())
 
 
 def _dequantize_kv_cache(packed_kv):

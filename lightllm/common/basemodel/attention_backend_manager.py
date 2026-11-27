@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional
 
-import triton
+import torch
 
 from lightllm.common.attention import selector
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources
+from lightllm.common.attention.backend import AttentionBackend
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.workspace_utils import get_gpu_workspace_buffer
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
@@ -43,8 +43,9 @@ class AttentionBackendManager:
     """
 
     def __init__(self):
-        # By role: the model-wide build resources.
-        self.resources: dict[str, AttentionBuildResources] = {}
+        # (device, name, dtype) -> requested size -> buffer, shared by main and drafts.
+        self._workspace_buffers: dict[tuple, dict[int, torch.Tensor]] = {}
+        self._workspace_lock = threading.Lock()
         # By role and phase: the backend that builds each state_key's state.
         self.state_groups: dict[str, dict[str, dict[tuple, AttentionBackend]]] = {}
         self._backends: dict[tuple[str, str, int], AttentionBackend] = {}
@@ -59,23 +60,6 @@ class AttentionBackendManager:
         if role in self.state_groups:
             raise RuntimeError(f"attention backends of {role} are already registered")
         args = model.args
-        # Dynamic verification may keep the target row and all MTP draft rows for every running
-        # request. TPSP and CUDA graphs may pad that physical batch further.
-        max_decode_rows = args.running_max_req_size * (args.mtp_step + 1)
-        if args.enable_tpsp_mix_mode:
-            max_decode_rows = triton.cdiv(max_decode_rows, model.tp_world_size_) * model.tp_world_size_
-        self.resources[role] = AttentionBuildResources(
-            device=get_current_device_id(),
-            page_size=args.page_size,
-            # max_seq_length is max_req_total_len plus the MTP headroom reserved at model init.
-            max_seq_len=model.max_seq_length,
-            max_cuda_graph_batch_size=model.graph_max_batch_size,
-            max_decode_rows=max(max_decode_rows, model.graph_max_batch_size),
-            microbatch_count=2 if args.enable_decode_microbatch_overlap else 1,
-            workspace_bytes=args.flashinfer_workspace_size * 1024 * 1024,
-            get_workspace=get_gpu_workspace_buffer,
-            diverse_decode=args.diverse_mode,
-        )
         states = model.att_state_manager
         groups = self.state_groups[role] = {phase: {} for phase in selector.PHASES}
         if not (states.get_full_attention_states(role) or states.get_bounded_attention_states(role)):
@@ -102,14 +86,34 @@ class AttentionBackendManager:
         """The backend that runs the layer in this phase."""
         return self._backends[model_role, phase, logical_layer_id]
 
+    def get_workspace(self, name: str, numel: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
+        """Return shared storage on the current device, keeping repeated requests at one address.
+
+        A new smaller request reuses a larger buffer's prefix, so drafts can borrow the main model's
+        reservation. Concurrent users must use different names or disjoint regions of one buffer.
+        """
+        if not name:
+            raise ValueError("workspace name must not be empty")
+        if numel <= 0:
+            raise ValueError(f"workspace numel must be positive, got {numel}")
+
+        device = get_current_device_id()
+        with self._workspace_lock:
+            buffers = self._workspace_buffers.setdefault((device, name, dtype), {})
+            buffer = buffers.get(numel)
+            if buffer is None:
+                larger = [buffers[size] for size in sorted(buffers) if size > numel]
+                buffer = larger[0][:numel] if larger else torch.empty(numel, dtype=dtype, device=device)
+                buffers[numel] = buffer
+            return buffer
+
     def create_att_state(self, infer_state: InferStateInfo) -> dict[tuple, Any]:
         """Build this microbatch's state by state_key for the layers of its role and phase."""
         role = infer_state.att_state_role
         groups = self.state_groups[role]["prefill" if infer_state.is_prefill else "decode"]
         if not groups:
             return {}
-        resources = self.resources[role]
-        return {key: backend.create_att_state(infer_state, resources) for key, backend in groups.items()}
+        return {key: backend.create_att_state(infer_state) for key, backend in groups.items()}
 
     def has_attention(self, model_role: str) -> bool:
         return any(self.state_groups[model_role].values())

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Callable, Optional
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from ..gdn.triton import GDNDecodeAttState, build_recurrent_decode_state
 from . import KDALayerConfig, KDALayerInputs
 from .flashkda import import_flash_kda_fwd, load_flash_kda_fwd
@@ -105,7 +105,7 @@ class TritonKDAPrefillBackend(AttentionBackend[KDALayerConfig, KDAPrefillAttStat
         c = layer_config
         return c.replay, c.state_mtp_step, c.prefill_kernel, c.num_heads, c.dtype, c.ssm_dtype
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         config = self.layer_config
         self.flash_kda_fwd = load_flash_kda_fwd(config.prefill_kernel, dtype=config.dtype, ssm_dtype=config.ssm_dtype)
         # Automatic selection keeps FlashKDA to the step lengths it was validated on.

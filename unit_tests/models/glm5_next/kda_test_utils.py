@@ -96,7 +96,7 @@ class KDAAttention:
         }
         self.backends = {phase: backend_cls(layer_config) for phase, backend_cls in backend_classes.items()}
         for backend in self.backends.values():
-            backend.setup(None)
+            backend.init_runtime(None)
         self.flash_kda_fwd = self.backends["prefill"].flash_kda_fwd
 
     def create_att_prefill_state(self, infer):

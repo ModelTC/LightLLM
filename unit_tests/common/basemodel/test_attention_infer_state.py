@@ -46,7 +46,7 @@ def make_model(monkeypatch):
         model._select_mem_indexes = lambda value: torch.zeros_like(value.b_req_idx)
         model._init_attention()
 
-        def record_inputs(infer, resources):
+        def record_inputs(infer):
             return (
                 infer.decode_rows_per_request,
                 infer.dynamic_decode_rows,
@@ -173,3 +173,29 @@ def test_steps_without_attention_skip_preparation(make_model, build_attention):
     assert not infer.dynamic_decode_rows
     assert infer.req_to_mtp_state_index is None
     assert infer.cuda_graph_max_kv_seq_len is None
+
+
+@pytest.mark.parametrize("role", ["main", "draft0"])
+@pytest.mark.parametrize("graph_batch", [4, 64])
+def test_model_supplies_capacities_before_init_runtime(make_model, role, graph_batch):
+    model = make_model(role=role, mtp_step=2)
+    model.args.running_max_req_size = 7
+    model.args.enable_tpsp_mix_mode = True
+    model.args.diverse_mode = True
+    model.args.page_size = 16
+    model.tp_world_size_ = 4
+    model.graph_max_batch_size = graph_batch
+
+    def check(infer):
+        assert infer.attention_backend_manager is model.attention_backend_manager
+        assert infer.page_size == 16
+        assert infer.model_max_seq_len == 1024
+        assert infer.max_cuda_graph_batch_size == graph_batch
+        assert infer.max_decode_rows == max(24, graph_batch)
+        assert infer.diverse_decode
+
+    model.attention_backend_manager.state_groups[role]["decode"] = {
+        ("capacities",): SimpleNamespace(create_att_state=check)
+    }
+    for graph_mode in GraphMode:
+        model._create_inferstate(_make_decode_input(), graph_mode=graph_mode)

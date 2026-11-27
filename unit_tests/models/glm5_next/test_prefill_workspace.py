@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next import prefill_workspace
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
@@ -28,6 +29,7 @@ def test_prefill_workspace_reservation(current_cuda_device, overlap, run_mode):
         max_seq_length=13,
         config={"index_topk": 2048, "index_kpool": 4},
         att_state_role=f"workspace_test_{run_mode}_{overlap}",
+        attention_backend_manager=AttentionBackendManager(),
     )
     reserved = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model)
     pointers = [{key: value.data_ptr() for key, value in buffers.items()} for buffers in reserved]
@@ -44,9 +46,7 @@ def test_prefill_workspace_reservation(current_cuda_device, overlap, run_mode):
 
 
 def test_draft_models_reuse_the_main_models_prefill_regions(current_cuda_device, monkeypatch):
-    from lightllm.utils import workspace_utils
-
-    monkeypatch.setattr(workspace_utils, "_workspace_buffers", {})
+    manager = AttentionBackendManager()
 
     def model(role, batch_max_tokens):
         return SimpleNamespace(
@@ -56,6 +56,7 @@ def test_draft_models_reuse_the_main_models_prefill_regions(current_cuda_device,
             max_seq_length=13,
             config={"index_topk": 2048, "index_kpool": 4},
             att_state_role=role,
+            attention_backend_manager=manager,
         )
 
     main = prefill_workspace.reserve_fp8_sparse_prefill_workspaces(model("main", 8))

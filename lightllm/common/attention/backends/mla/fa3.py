@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
 from ..gqa.fa3 import FA3GQADecodeAttState, build_fa3_decode_state, FA3_CPU_CACHE_SYNC
 from . import (
     MLADecodeLayerConfig,
@@ -81,10 +81,9 @@ class FA3MLADecodeBackend(AttentionBackend[MLADecodeLayerConfig, FA3GQADecodeAtt
     phase = "decode"
     requires_cpu_cache_sync = FA3_CPU_CACHE_SYNC
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         # The latent cache is paged like an unquantized GQA cache.
-        self.resources = resources
-        self.page_size = resources.page_size
+        self.page_size = infer_state.page_size
 
     def build(self, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
         return build_fa3_decode_state(self, infer_state)

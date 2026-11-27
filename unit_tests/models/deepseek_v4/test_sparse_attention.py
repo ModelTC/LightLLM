@@ -16,6 +16,7 @@ from lightllm.common.attention.backends.sparse_mla.flashmla_swa import (
     FlashMLASWAPrefillBackend,
 )
 from lightllm.common.basemodel.infer_struct import GraphMode
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
 from lightllm.models.deepseek_v4 import swa_prefill_workspace
 from lightllm.models.deepseek_v4.config import create_attention_config
@@ -71,11 +72,12 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         batch_max_tokens=4096,
         max_req_num=8,
         att_state_role="main",
+        attention_backend_manager=AttentionBackendManager(),
     )
     monkeypatch.setattr(
-        swa_prefill_workspace,
-        "get_gpu_workspace_buffer",
-        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
+        model.attention_backend_manager,
+        "get_workspace",
+        lambda name, numel, dtype: torch.empty(numel, dtype=dtype),
     )
     workspace, capacity = reserve_swa_prefill_workspace(model)
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
@@ -89,12 +91,10 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
 
 
 def test_draft_models_reuse_the_main_swa_workspace_of_the_same_layout(monkeypatch: pytest.MonkeyPatch) -> None:
-    from lightllm.utils import workspace_utils
-
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
-    monkeypatch.setattr(workspace_utils, "_workspace_buffers", {})
+    manager = AttentionBackendManager()
 
     def model(role, layers, batch_max_tokens=512):
         return SimpleNamespace(
@@ -112,6 +112,7 @@ def test_draft_models_reuse_the_main_swa_workspace_of_the_same_layout(monkeypatc
             batch_max_tokens=batch_max_tokens,
             max_req_num=8,
             att_state_role=role,
+            attention_backend_manager=manager,
         )
 
     main, capacity = reserve_swa_prefill_workspace(model("main", range(3)))

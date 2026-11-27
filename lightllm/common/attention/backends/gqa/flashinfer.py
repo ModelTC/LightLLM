@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Union
 import torch
 import triton
 
-from lightllm.common.attention.backend import AttentionBackend, AttentionBuildResources, TensorAllocator
+from lightllm.common.attention.backend import AttentionBackend, TensorAllocator
+from lightllm.utils.envs_utils import get_env_start_args
 from .. import set_flashinfer_envs
 from . import GQALayerConfig, GQALayerInputs
 
@@ -80,19 +81,22 @@ class FlashInferGQAPrefillBackend(AttentionBackend[GQALayerConfig, FlashInferGQA
         c = layer_config
         return c.num_heads, c.num_kv_heads, c.head_dim, c.dtype, c.kv_quant
 
-    def setup(self, resources: AttentionBuildResources) -> None:
-        if resources.workspace_bytes <= 0:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
+        workspace_bytes = get_env_start_args().flashinfer_workspace_size * 1024 * 1024
+        if workspace_bytes <= 0:
             raise ValueError("the FlashInfer workspace size (--flashinfer_workspace_size) must be positive")
         set_flashinfer_envs()
         config = self.layer_config
         fp8 = config.kv_quant == "fp8_per_tensor"
         # TODO: use the cache's page size once FP8 FlashInfer supports multi-token pages.
-        self.page_size = 1 if fp8 else resources.page_size
-        self.max_pages_per_request = triton.cdiv(resources.max_seq_len, self.page_size)
+        self.page_size = 1 if fp8 else infer_state.page_size
+        self.max_pages_per_request = triton.cdiv(infer_state.model_max_seq_len, self.page_size)
         # The arguments every plan of this group shares.
         self._plan_args = (config.num_heads, config.num_kv_heads, config.head_dim, self.page_size)
         self._dtypes = dict(q_data_type=config.dtype, kv_data_type=torch.float8_e4m3fn if fp8 else config.dtype)
-        self.workspace = resources.get_workspace("flashinfer_fp", resources.workspace_bytes, torch.int8)
+        self.workspace = infer_state.attention_backend_manager.get_workspace(
+            "flashinfer_fp", workspace_bytes, torch.int8
+        )
 
     def build(self, infer_state: InferStateInfo) -> FlashInferGQAAttState:
         """Build and plan a prefill wrapper for the step's packed queries and paged cache."""
@@ -164,12 +168,14 @@ class FlashInferGQADecodeBackend(FlashInferGQAPrefillBackend):
     name = "flashinfer_gqa_decode"
     phase = "decode"
 
-    def setup(self, resources: AttentionBuildResources) -> None:
+    def init_runtime(self, infer_state: InferStateInfo) -> None:
         """Keep one page-index buffer per microbatch for batches of up to the CUDA graph batch size."""
-        super().setup(resources)
-        self.max_batch_size = resources.max_cuda_graph_batch_size
+        super().init_runtime(infer_state)
+        self.max_batch_size = infer_state.max_cuda_graph_batch_size
         numel = self.max_batch_size * self.max_pages_per_request
-        self._kv_indices = [torch.empty(numel, dtype=torch.int32, device=resources.device) for _ in range(2)]
+        self._kv_indices = [
+            torch.empty(numel, dtype=torch.int32, device=infer_state.b_seq_len.device) for _ in range(2)
+        ]
         self._graph_wrappers: dict[tuple[int, int], tuple] = {}
 
     def build(self, infer_state: InferStateInfo) -> FlashInferGQAAttState:

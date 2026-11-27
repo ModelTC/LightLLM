@@ -18,10 +18,14 @@ import torch
 
 from lightllm.common.attention.backends.gqa import GQALayerConfig
 from lightllm.common.attention.backends.mla import MLADecodeLayerConfig
-from unit_tests.common.attention.backends.groups_runner import set_up
-from unit_tests.common.attention.backends.step_fixture import make_infer_state, make_resources
+from unit_tests.common.attention.backends.groups_runner import init_backend
+from lightllm.common.basemodel.attention_backend_manager import AttentionBackendManager
+from unit_tests.common.attention.backends.step_fixture import make_infer_state
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+pytestmark = [
+    pytest.mark.usefixtures("runtime_start_args"),
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+]
 
 REQUESTS, MAX_LEN, PAD, CAPACITY = 8, 512, 7, 512
 
@@ -79,10 +83,14 @@ def no_extra(step):
     return {}
 
 
-def ready(backend_cls, layer_config, **resources):
+def ready(backend_cls, layer_config, **fields_override):
     """A backend set up as its state group's first create_att_state sets it up."""
-    fields = dict(max_seq_len=MAX_LEN, max_cuda_graph_batch_size=8, max_decode_rows=8)
-    return set_up(backend_cls, layer_config, make_resources(**{**fields, **resources}))
+    fields = dict(model_max_seq_len=MAX_LEN, max_cuda_graph_batch_size=8, max_decode_rows=8)
+    return init_backend(
+        backend_cls,
+        layer_config,
+        make_infer_state(b_seq_len=torch.empty(0, device="cuda"), **{**fields, **fields_override}),
+    )
 
 
 def gqa_config(**fields):
@@ -236,9 +244,14 @@ def test_decode_backend_keeps_the_cuda_graph_contract(name, layout):
     backend = factory()
     token_map = torch.randperm(REQUESTS * MAX_LEN, device="cuda", dtype=torch.int32).view(REQUESTS, MAX_LEN)
     capture_step, replay_step = LAYOUTS[layout]
+    managers = {}
 
     def build(step, *, capacity=CAPACITY, microbatch=0, builder=backend):
         batch = make_batch(token_map, step, layout, capacity=capacity, microbatch=microbatch, extra=extra)
+        # The eager reference has its own manager so it cannot overwrite the captured page table.
+        if builder not in managers:
+            managers[builder] = AttentionBackendManager()
+        batch.attention_backend_manager = managers[builder]
         return batch, builder.build(batch)
 
     capture_batch, captured = build(capture_step)

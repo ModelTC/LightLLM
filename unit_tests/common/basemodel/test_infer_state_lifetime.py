@@ -39,7 +39,6 @@ def no_cycle_gc():
 def _runtime(groups: dict) -> AttentionBackendManager:
     """A manager whose main role has the given state groups per phase, without registering layers."""
     runtime = AttentionBackendManager()
-    runtime.resources["main"] = None
     runtime.state_groups["main"] = {"prefill": {}, "decode": {}, **groups}
     return runtime
 
@@ -50,7 +49,7 @@ def _create_state(is_prefill):
     owner.position_ids = torch.arange(4)
     owner.b_req_idx = owner.position_ids
     owner.req_manager = SimpleNamespace(req_to_token_indexs=None)
-    backend = SimpleNamespace(create_att_state=lambda metadata, resources: _AttState(metadata.b_req_idx))
+    backend = SimpleNamespace(create_att_state=lambda metadata: _AttState(metadata.b_req_idx))
     phase = "prefill" if is_prefill else "decode"
     runtime = _runtime({phase: {"group": backend}})
     owner.att_states = runtime.create_att_state(owner)

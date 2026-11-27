@@ -46,15 +46,15 @@ GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型�
 
 `AttentionBackendManager` 与 `AttentionStateManager` 的组织方式一致：主模型在 `prepare_attention_states` 中创建两个 manager，MTP 草稿模型引用同一实例；manager 内按模型角色（`att_state_role`，即 `main`、`draft0` … `draft35`）区分各模型，层按 `(角色, 阶段, 逻辑层号)` 查找 backend，与按 `(角色, 状态类型, 逻辑层号)` 查找 State 对应。
 
-- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它从模型取得本角色的构建资源，再对每层调用 `attention_config(model)`，显式遍历 prefill 和 decode 配置，交给本次注册独有的 `BackendSelector(args)` 选择和复用 backend。selector 集中处理层指定名称、CLI、auto 优先级和 EP 排除规则，manager 保存层绑定和状态分组。同一角色内阶段、layer config 和最终请求的 backend 名称都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
+- `register_backends(model)` 在 `init_runtime` 的 `_init_attention` 中为本角色调用一次，同一角色重复登记时报错。它对每层调用 `attention_config(model)`，显式遍历 prefill 和 decode 配置，交给本次注册独有的 `BackendSelector(args)` 选择和复用 backend。selector 集中处理层指定名称、CLI、auto 优先级和 EP 排除规则，manager 保存层绑定和状态分组。同一角色内阶段、layer config 和最终请求的 backend 名称都相同的层共用实例；不同角色不共用实例，因为实例持有本角色的跨步存储和 CUDA graph 张量。某阶段的 layer config 为 `None` 时该层在此阶段不登记，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个选出的实例负责创建状态。没有 attention State 的角色（纯 FFN 草稿模型）不登记 backend，`has_attention(role)` 为假。
 - `get_backend(model_role, phase, logical_layer_id)` 返回该层在该阶段的 backend，层在每次调用 attention 时查找。
 - `create_att_state(infer_state)` 在每个 microbatch 对 `infer_state.att_state_role` 本阶段各组的代表实例调用一次 `backend.create_att_state`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
 - `requires_cpu_cache_sync`：是否有任一角色登记的实现不能与 CPU cache 搬运在 GPU 上并行。
 
-`register_backends` 从模型取得本角色的构建资源，之后不再持有模型：
+`register_backends` 完成登记后不持有模型：
 
-- `resources[role]` 是该模型的资源与容量（`AttentionBuildResources`），供 backend 的 `setup` 创建跨步存储（第 3 节）。
-- 每步所需的 decode 行数、dynamic verify 布局、投机状态索引和 CUDA graph KV 长度容量由模型在 `_create_inferstate` 中直接写入 `InferStateInfo`，manager 只分派到本角色、本阶段的 backend。
+- manager 持有共享 workspace 的缓存，通过 `get_workspace(name, numel, dtype)` 提供缓冲区；main 与 draft 共用 manager，独立 manager 之间不共享缓冲区。
+- 模型在 `_create_inferstate` 中把 page size、模型序列容量、graph batch 容量、最大 decode 行数和 diverse 开关写入 `InferStateInfo`，同时准备本步的 decode 行数、dynamic verify 布局、投机状态索引和 CUDA graph KV 长度容量。manager 只分派到本角色、本阶段的 backend。
 - `graph_max_len_in_batch` 的 MTP 余量调整在模型构造函数中完成，首次准备 graph 步之前就已确定。
 
 层的因果性（`attention_is_causal`）在 `attention_config` 中写入 layer config。
@@ -81,8 +81,8 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 - 类属性 `name` 是实现名，`phase` 是运行阶段（`"prefill"` 或 `"decode"`）。选择器只把 backend 绑定到它声明的阶段，注册表登记到错误阶段时抛出 `TypeError`。
 - `group_key(layer_config)` 声明哪些配置会改变本步准备工作。运行时用 `(backend 类, group_key)` 作为 `state_key`，prefill 和 decode 各有自己的状态表。
-- `create_att_state(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
-- `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `setup` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `setup`。
+- `create_att_state(infer_state)` 首次调用时执行 `init_runtime(infer_state)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`init_runtime` 和 `build` 只能读取 `group_key` 包含的 layer config 字段；模型容量从 `infer_state` 读取。backend 可以保存需要的标量和缓冲区，不保存整份 `InferStateInfo`。
+- `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `init_runtime` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `init_runtime`。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
 - 类属性 `requires_cpu_cache_sync` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
 
@@ -96,14 +96,13 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 每步的主流程是 `InferStateInfo → backend.create_att_state → att_state → backend.forward`。模型为这一步提供请求长度和 KV 索引，各后端只在 `att_state` 中保留 kernel 所需的参数。
 
-模型的 `AttentionBuildResources` 只用于初始化。需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端在 `setup` 中把它们放在组的代表实例上，不另设存储类型；其余后端不覆盖 `setup`。
+需要跨步保存页表、wrapper 或 CUDA graph 缓冲区的后端在首次调用的 `init_runtime(infer_state)` 中准备存储，保存在组的代表实例上；其余后端不覆盖 `init_runtime`。FlashInfer GQA 在自己的 `init_runtime` 中读取并校验启动参数 `flashinfer_workspace_size`，MLA 使用实现内的固定大小，这些私有选项不放入 `InferStateInfo`。
 
 | 类型 | 生命周期 | 内容 |
 | --- | --- | --- |
 | `*LayerConfig` | 模型加载时确定 | 一层的静态配置：head 数、维度、dtype、scale、因果性、滑窗、sinks、KV 量化方式等。frozen dataclass，可哈希，构造时校验字段。 |
 | `AttentionBackend` | 模型加载时创建 | 每层持有各阶段的 backend，相同阶段与 layer config 的层共用同一实例。 |
-| `AttentionBuildResources` | 每个模型对象一份 | 模型提供给 backend `setup` 的资源与容量，不含模型对象：设备、page size、最大序列长度、CUDA graph 最大 batch size、decode 行数上限（含 MTP 和 TPSP 对齐）、microbatch 数、共享 workspace 的大小与按名称共享的分配函数、decode batch 是否带 diverse 分组，以及模型预留的 prefill workspace。 |
-| `InferStateInfo` | 每步一次 | 保存请求张量、累积偏移、prefill 的 cached prefix、投机解码的行布局、CUDA graph 容量和 microbatch 编号。 |
+| `InferStateInfo` | 每步一次 | 保存请求张量、累积偏移、prefill 的 cached prefix、投机解码的行布局、CUDA graph 容量和 microbatch 编号，以及本角色固定的 page size、模型序列容量、graph batch 容量、最大 decode 行数和 diverse 开关。 |
 | `att_state` | 属于当前 microbatch，兼容的层共用 | 层通过 `infer_state.att_states[backend.state_key]` 取出状态。各后端的状态只持有所需字段或预先准备的页表、索引和 wrapper。 |
 | `*LayerInputs` | 每次层调用 | 本层的张量：q、KV cache 视图、量化 scale、状态视图、稀疏索引等。 |
 
@@ -111,7 +110,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 
 - KV cache 由模型层在 attention 之前写入，不由 backend 写入。
 - attention state 显式传参，不经过全局 forward context；microbatch overlap 的两个并发步各自持有 attention state。
-- workspace 在进程内按 (设备, 名称, dtype) 共享（`lightllm/utils/workspace_utils.py` 的 `get_gpu_workspace_buffer`）：不大于已有缓冲区的请求得到其前缀视图，因此草稿模型复用主模型的预留，不再各自分配。同一名称同一时刻只能有一个使用者，同时存活的缓冲区（如两个 microbatch 的区域）使用不同名称；GLM-5 的 FP8 prefill 区域按 microbatch 命名，DeepSeek V4 的 SWA 暂存区按每层布局命名。
+- workspace 在同一 `AttentionBackendManager` 内按 (设备, 名称, dtype) 共享（`get_workspace`）：不大于已有缓冲区的请求得到其前缀视图，因此草稿模型复用主模型的预留，不再各自分配。同一名称同一时刻只能有一个使用者，同时存活的缓冲区（如两个 microbatch 的区域）使用不同名称；GLM-5 的 FP8 prefill 区域按 microbatch 命名，DeepSeek V4 的 SWA 暂存区按每层布局命名。
 
 ## 4. 接口契约
 
@@ -129,6 +128,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - decode 默认每个请求一行。投机解码时，固定布局下每个请求有 `decode_rows_per_request` 个连续行；dynamic verify 布局下行数可变，相同 `b_req_idx` 的连续行属于同一请求，`pad_req_idx` 的行是 padding，各自独立。
 - 线性注意力的投机解码行从请求最后一个被接受的行恢复状态；模型在 `_init_attention` 检查每个角色最多只有一个带投机状态索引的 recurrent State。每步 decode 行数大于 1 时，`_create_inferstate` 将本角色 State 的 `mtp_state_index` 引用直接写入 `req_to_mtp_state_index`；prefill 和单行 decode 保持为 `None`。
 - `cuda_graph_max_kv_seq_len` 在捕获和 replay 步给出 graph 的长度容量，eager 步为 `None`；`uses_cuda_graph` 是唯一的 graph 开关。
+- `model_max_seq_len` 是包含 MTP 余量的模型序列容量，区别于本步的 `max_kv_seq_len` 和模型子类使用的 `max_seq_len`。`max_decode_rows` 包含 MTP 行数、TPSP 对齐和最大 graph batch；这些容量在同一角色内保持不变，不随请求长度更新。
 
 ### 4.3 AttentionBackend.build
 
@@ -201,12 +201,12 @@ sequenceDiagram
     participant B as AttentionBackend
     participant G as CUDA graph
     M->>M: 捕获步 _create_inferstate(graph_mode=CAPTURE)
-    M->>B: create_att_state(infer_state, resources)
+    M->>B: create_att_state(infer_state)
     B-->>M: attention state（保存的地址）
     M->>A: 保存 att_states
     M->>G: 在 torch.cuda.graph 中运行各层 forward
     M->>M: replay 步 _create_inferstate(graph_mode=REPLAY)
-    M->>B: create_att_state(infer_state, resources)，原地更新张量 / wrapper
+    M->>B: create_att_state(infer_state)，原地更新张量 / wrapper
     M->>G: copy_for_cuda_graph 把请求张量拷入捕获时的 InferStateInfo
     M->>G: graph.replay()
 ```
@@ -227,7 +227,7 @@ sequenceDiagram
 
 ```text
 lightllm/common/attention/          # 不知道模型的存在
-├── backend.py                      # 公共接口和类型：AttentionBackend、AttentionBuildResources
+├── backend.py                      # 公共接口和类型：AttentionBackend、TensorAllocator、GraphMode
 ├── selector.py                     # BackendSelector：选择规则与角色内的 backend 实例复用
 ├── backends/
 │   ├── __init__.py                 # require_positive、set_flashinfer_envs
@@ -246,7 +246,7 @@ lightllm/common/basemodel/
 ## 10. 新增实现
 
 1. 若是新算法族，在 `backends/<family>/__init__.py` 定义 layer config（frozen、构造时校验）和 layer inputs，并写清张量布局。
-2. 在 `backends/<family>/<backend>.py` 定义 backend 和本步状态。backend 构造时检查配置，`group_key` 列出准备工作读取的配置字段，需要跨步存储时覆盖 `setup`，`build` 遵守第 4.3 节的约束，`forward` 读取当前层的输入。与已有 backend 只差少量行为的实现（如 replay 状态、另一种 prefill kernel）以子类表达，不复制整个类。
+2. 在 `backends/<family>/<backend>.py` 定义 backend 和本步状态。backend 构造时检查配置，`group_key` 列出准备工作读取的配置字段，需要跨步存储时覆盖 `init_runtime`，`build` 遵守第 4.3 节的约束，`forward` 读取当前层的输入。与已有 backend 只差少量行为的实现（如 replay 状态、另一种 prefill kernel）以子类表达，不复制整个类。
 3. 在 `selector.py` 的注册表中登记该实现的名称、backend 和 `auto` 优先级。
 4. 模型层在 `attention_config()` 中返回两个阶段的配置。逐层数据在模型层解析后通过 layer inputs 传入。
 
@@ -255,7 +255,7 @@ lightllm/common/basemodel/
 - backend 与独立的 torch 参考实现对比（量化路径对比反量化后的参考，容差需说明来源），覆盖 cached prefix、各 decode 布局和该实现声明支持的层属性。
 - 不支持的 layer config 在构造时被拒绝；选择器测试覆盖 `auto` 跳过不支持的配置、显式指定不支持时报错。
 - 新的 decode backend 加入 `unit_tests/common/attention/backends/test_step_builder_graph_contract.py`：同一 `(microbatch, batch size)` 的捕获步与 replay 步保持地址和布局、值等于 eager 构造、主机字段除 hint 外不变、不同 microbatch 不共享存储。
-- 在 `unit_tests/common/basemodel/test_attention_backend_manager.py` 中验证新的 `group_key`。键相同的层共用 attention state，PD 节点只为所需阶段执行 `setup`。
+- 在 `unit_tests/common/basemodel/test_attention_backend_manager.py` 中验证新的 `group_key`。键相同的层共用 attention state，PD 节点只为所需阶段执行 `init_runtime`。
 - 至少一个测试通过 LightLLM 的 `CudaGraph.capture_decode` / `replay` 在长度变化后 replay。
 - 重构已有路径时，用相同输入与改动前对比各层输出逐位一致；有意改变行为的修复单独提交并附回归测试。
 
