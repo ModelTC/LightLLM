@@ -25,8 +25,10 @@ def _int8_quant_kernel(inputs, output, scales, width: tl.constexpr, stride, bloc
     row = tl.program_id(0)
     cols = tl.arange(0, block)
     values = tl.load(inputs + row * stride + cols, cols < width, 0).to(tl.float32)
-    scale = tl.maximum(tl.max(tl.abs(values), 0) / 127.0, 1.1754943508222875e-38)
-    quant = tl.extra.cuda.libdevice.rint(tl.div_rn(values, scale))
+    absmax = tl.max(tl.abs(values), 0)
+    scale = tl.maximum(absmax / 127.0, 1.1754943508222875e-38)
+    inverse_scale = tl.div_rn(127.0, tl.maximum(absmax, 127.0 * 1.1754943508222875e-38))
+    quant = tl.extra.cuda.libdevice.rint(values * inverse_scale)
     tl.store(output + row * width + cols, quant.to(tl.int8), cols < width)
     tl.store(scales + row, scale)
 
