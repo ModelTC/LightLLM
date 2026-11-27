@@ -29,3 +29,26 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh b/python/
        thread_tfg = exec_cfg.tb_cfg;
        if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
          max_thread_m_blocks--;
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
+@@ -390,6 +390,9 @@
+   int k_tiles = prob_k / 16 / thread_k_blocks;
+   int n_tiles = prob_n / 16 / thread_n_blocks;
+   int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
++  if constexpr (m_block_size_8) {
++    if (prob_m * top_k <= 8) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++  }
+
+   if constexpr (!has_act_order && group_blocks != -1) {
+     if (group_blocks >= thread_k_blocks) {
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
+@@ -722,5 +722,5 @@
+   int num_threads = thread_tfg.num_threads;
+   thread_k = thread_tfg.thread_k;
+   thread_n = thread_tfg.thread_n;
+-  int blocks = sms * exec_cfg.blocks_per_sm;
++  int blocks = m_block_size_8 ? sms : sms * exec_cfg.blocks_per_sm;
+   if (exec_cfg.blocks_per_sm > 1) max_shared_mem = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
