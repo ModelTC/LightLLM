@@ -16,10 +16,11 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
     lightllm_per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
-from lightllm.utils.device_utils import is_hopper
+from lightllm.utils.device_utils import is_hopper, triton_support_tensor_descriptor
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
+_INT8_HOPPER_4096_CONFIG = dict(BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=4)
 
 
 @triton.jit
@@ -132,12 +133,6 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         if (
             out is not None
             and bias is None
-            and 0 < m <= 16
-            and 3072 <= n <= 8192
-            and 3072 <= depth <= 8192
-            and n * depth <= 8192 * 4096
-            and n % 128 == 0
-            and depth % 128 == 0
             and input_tensor.dtype in (torch.float16, torch.bfloat16)
             and qweight.T.is_contiguous()
             and weight_scale.numel() == n
@@ -147,7 +142,19 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
             and out.is_contiguous()
             and is_hopper()
         ):
-            return int8_scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out)
+            if (
+                0 < m <= 16
+                and 3072 <= n <= 8192
+                and 3072 <= depth <= 8192
+                and n * depth <= 8192 * 4096
+                and n % 128 == 0
+                and depth % 128 == 0
+            ):
+                return int8_scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out)
+            if n == depth == 4096 and 256 <= m <= 640 and m % 64 == 0 and triton_support_tensor_descriptor():
+                return int8_scaled_mm_per_token(
+                    x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_INT8_HOPPER_4096_CONFIG
+                )
         result = _sgl_scaled_mm(
             getattr(sgl_ops, "int8_scaled_mm", None), x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out, bias
         )
