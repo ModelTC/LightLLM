@@ -269,6 +269,9 @@ class HttpPdPrefillFirstManagerHelper:
         pending_tokens = []
         while True:
             self.raise_if_request_stopped(origin_request_id)
+            # TODO: 区分 P/D 错误，仅在首 token 需要续写时传播 Decode busy。
+            # 默认资源等待为 20 秒。只有 Master 在处理首 token 前收到 Decode 超时上报，且首 token 恰好是终态，
+            # busy 才会覆盖 Prefill 的正常结束，因此默认配置下触发概率低。
             req_status.raise_if_error()
             if await request.is_disconnected():
                 raise ClientDisconnected(

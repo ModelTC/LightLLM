@@ -12,6 +12,7 @@ import datetime
 import pickle
 import numpy as np
 from array import array
+from itertools import repeat
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -686,7 +687,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             raise InvalidRequestError("PD Decode prompt arrays must be one-dimensional int64 arrays.")
 
         # 这里的校验对多模态不是很充分, to do
-        if all(isinstance(e, int) for e in prompt):
+        if all(map(isinstance, prompt, repeat(int))):
             if not self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt

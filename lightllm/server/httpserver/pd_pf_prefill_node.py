@@ -138,6 +138,8 @@ def write_prefill_first_decode_node_info(
         logger.error(f"prefill-first request {group_request_id} disappeared before writing decode kv ready")
         return False
     shm_req = req_status.group_req_objs.shm_req_objs[0]
+    # TODO: 将 Decode 端点写入失败限制到当前请求。目前超出共享内存容量会触发连接级清理。
+    # 默认 NCCL 的端点通常远小于 8 KiB。后端元数据较大或容量配置不足时才容易触发。
     shm_req.sample_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
     logger.info(f"prefill-first stage=wrote-decode-kv-ready, group_request_id={group_request_id}")
     return True
