@@ -451,9 +451,12 @@ class FP8w8a8PerTensorAutoQuantizationMethod(FP8w8a8PerTensorTritonQuantizationM
 
 
 class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
+    use_ue8m0_scales = False
+
     def __init__(self):
         super().__init__()
         self.block_size = 128
+        self.activation_quant_eps = 1e-10
         self.weight_scale_suffix = "weight_scale_inv"
         self.has_weight_scale = True
         self.has_weight_zero_point = False
@@ -462,7 +465,11 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(
+            weight.cuda(device),
+            self.block_size,
+            use_ue8m0_scales=self.use_ue8m0_scales,
+        )
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -476,14 +483,17 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale.t()
-        input_scale = None  # dynamic quantization for input tensor
-        m, k = input_tensor.shape
+        m, _ = input_tensor.shape
         n = qweight.shape[1]
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
-        if input_scale is None:
-            qinput_tensor, input_scale = per_token_group_quant_fp8(
-                input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func
-            )
+        qinput_tensor, input_scale = per_token_group_quant_fp8(
+            input_tensor,
+            self.block_size,
+            eps=self.activation_quant_eps,
+            dtype=qweight.dtype,
+            alloc_func=alloc_func,
+            use_ue8m0_scales=self.use_ue8m0_scales,
+        )
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         return qinput_tensor, qweight, input_scale, weight_scale, out
@@ -572,3 +582,20 @@ class FP8w8a8B128AutoQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
         if bias is not None:
             out.add_(bias)
         return out
+
+
+@QUANTMETHODS.register("fp8w8a8-b32-triton", platform="cuda")
+class FP8w8a8B32TritonQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.activation_quant_eps = 1e-4
+        self.weight_scale_suffix = "scale"
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b32-triton"
+
+    @property
+    def use_ue8m0_scales(self):
+        return bool(self.hf_quantization_config and self.hf_quantization_config.get("scale_fmt") == "ue8m0")

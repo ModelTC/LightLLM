@@ -9,6 +9,7 @@ import torch.multiprocessing as mp
 
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNPagesPool, KDAPagesPool
 from lightllm.common.attention_state.bounded_att import utils
+from lightllm.utils import cuda_host_memory
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -56,13 +57,13 @@ def test_shared_registration_lives_until_last_view(
 ) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = True
     unregistered = []
-    unregister = utils._unregister_page_pool_storage
+    unregister = cuda_host_memory.unregister_host_memory
 
-    def record_unregister(ptr: int, device_id: int) -> None:
+    def record_unregister(ptr: int) -> None:
         unregistered.append(ptr)
-        unregister(ptr=ptr, device_id=device_id)
+        unregister(ptr)
 
-    monkeypatch.setattr(utils, "_unregister_page_pool_storage", record_unregister)
+    monkeypatch.setattr(cuda_host_memory, "unregister_host_memory", record_unregister)
     tensor = utils.create_page_pool_tensor(size=(4096,), dtype=torch.float32)
     ptr = tensor.data_ptr()
     view = tensor[1:]

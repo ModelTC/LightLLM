@@ -32,7 +32,7 @@ def _block_scaled_block_gemm(
     N,
     K,
     group_n,
-    group_k,
+    group_k: tl.constexpr,
     stride_am,
     stride_ak,
     stride_bk,
@@ -71,7 +71,7 @@ def _block_scaled_block_gemm(
         offs_ks = k * BLOCK_K // group_k
         a_s = tl.load(Ascale_ptrs + offs_ks * stride_Ascale_k)
         b_s = tl.load(Bscale_ptrs + offs_ks * stride_Bscale_k)
-        acc += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+        acc += tl.dot(a, b, max_num_imprecise_acc=0 if group_k == 32 else None) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
@@ -141,7 +141,7 @@ def w8a8_block_fp8_matmul(
         B: Matrix B with shape of [K, N].
         Ascale: per-token block-wise Quantization scale for A: [M, K / block_size[0]].
         Bscale: Quantization scale for B: [K / block_size[0], M / block_size[1]].
-        C: The output matrix with the shape of [M, N].
+        C: The output matrix with the shape of [M, N]. Columns are contiguous and rows may be padded.
         block_size: block granularity of quantization  (e.g., [128, 128]).
         dtype: The data type of C.
     Returns:
@@ -150,9 +150,10 @@ def w8a8_block_fp8_matmul(
     assert len(block_size) == 2
     block_k, block_n = block_size[0], block_size[1]
     assert A.shape[0] == Ascale.shape[0] and A.shape[-1] == B.shape[0]
-    assert A.is_contiguous() and C.is_contiguous()
+    assert A.is_contiguous()
     M, K = A.shape
     _, N = B.shape
+    assert C.is_contiguous() or (C.shape == (M, N) and C.stride(1) == 1 and C.stride(0) >= N)
     assert triton.cdiv(K, block_k) == Ascale.shape[-1] and Ascale.shape[-1] == Bscale.shape[0]
     assert triton.cdiv(N, block_n) == Bscale.shape[1]
     if not run_config:
@@ -164,6 +165,8 @@ def w8a8_block_fp8_matmul(
             "num_warps": 4,
             "num_stages": 3,
         }
+    # A dot tile must not cross a K block with a different quantization scale.
+    run_config = {**run_config, "BLOCK_K": min(run_config["BLOCK_K"], block_k)}
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
     _block_scaled_block_gemm[grid](
         A,

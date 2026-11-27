@@ -50,6 +50,7 @@ def build_c4_indexer_page_table(
     req_to_token_indexs: torch.Tensor,
     hold_req_id: int,
     out: torch.Tensor = None,
+    compress_ratio: int = 4,
 ):
     """Build DeepGEMM's query-row page table directly from the request token mapping.
 
@@ -79,7 +80,7 @@ def build_c4_indexer_page_table(
         token_num,
         page_cap,
         int(hold_req_id),
-        COMPRESS_RATIO=4,
+        COMPRESS_RATIO=compress_ratio,
         PAGE_SIZE=page_size,
         BLOCK_PAGES=block_pages,
         BLOCK_ROWS=block_rows,

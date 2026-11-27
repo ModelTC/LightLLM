@@ -1,29 +1,9 @@
 from types import SimpleNamespace
 
+import numpy as np
 import torch
+from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
-
-
-def _patch_empty_input_context(monkeypatch):
-    mem_manager = SimpleNamespace(
-        HOLD_TOKEN_MEMINDEXES=(-1,),
-        alloc=lambda size: torch.empty((size,), dtype=torch.int32),
-    )
-    infer_context = SimpleNamespace(
-        args=SimpleNamespace(page_size=1),
-        req_manager=SimpleNamespace(
-            HOLD_REQUEST_ID=-1,
-            mem_manager=mem_manager,
-            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
-        ),
-        radix_cache=None,
-    )
-    monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
-    return infer_context
-
-
-def _patch_overlap_input_context(monkeypatch):
-    return _patch_empty_input_context(monkeypatch)
 
 
 def _make_prefill_req(req_idx: int, token_num: int):
@@ -36,6 +16,7 @@ def _make_prefill_req(req_idx: int, token_num: int):
         get_chuncked_input_token_ids=lambda: input_token_ids,
         get_input_token_ids=lambda: input_token_ids,
         get_cur_total_len=lambda: token_num,
+        take_token_lookback=lambda: (),
     )
 
 
@@ -49,12 +30,11 @@ def _make_decode_req(req_idx: int):
         shared_kv_node=None,
         get_cur_total_len=lambda: 4,
         get_radix_cache_shared_len=lambda: 0,
+        take_token_lookback=lambda: (),
     )
 
 
-def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
-    _patch_empty_input_context(monkeypatch)
-
+def test_prepare_prefill_inputs_allows_empty_batch():
     model_input, run_reqs = generic_pre_process.prepare_prefill_inputs([], is_chuncked_mode=True)
 
     assert run_reqs == []
@@ -67,9 +47,7 @@ def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
     assert model_input.max_kv_seq_len == 0
 
 
-def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
-    _patch_empty_input_context(monkeypatch)
-
+def test_prepare_decode_inputs_allows_empty_batch():
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([])
 
     assert run_reqs == []
@@ -83,8 +61,41 @@ def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
     assert model_input.max_kv_seq_len == 0
 
 
-def test_overlap_prefill_balances_request_token_load_without_padding(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
+def test_batch_collects_cached_lookback_once(monkeypatch):
+    req = _make_decode_req(req_idx=7)
+    req.mtp_step = 2
+    req.token_lookback_taken = False
+    req.get_input_token_ids = lambda: np.arange(4)
+    req.take_token_lookback = lambda: InferReq.take_token_lookback(req)
+    monkeypatch.setattr(g_infer_context, "token_lookback_depth", 3)
+
+    model_input, run_reqs = generic_pre_process.prepare_decode_inputs([req])
+    assert run_reqs == [req, req, req]
+    assert model_input.token_lookback == [(7, 0, 0), (7, 1, 1), (7, 2, 2)]
+
+    model_input, _ = generic_pre_process.prepare_decode_inputs([req])
+    assert model_input.token_lookback == []
+
+
+def test_uncached_prefill_consumes_lookback_before_next_chunk(monkeypatch):
+    req = _make_prefill_req(req_idx=7, token_num=4)
+    req.token_lookback_taken = False
+    req.get_input_token_ids = lambda: np.arange(4)
+    req.get_chuncked_input_token_ids = lambda: np.arange(3)
+    req.take_token_lookback = lambda: InferReq.take_token_lookback(req)
+    monkeypatch.setattr(g_infer_context, "token_lookback_depth", 3)
+
+    first_input, _ = generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
+    assert first_input.token_lookback == []
+    assert req.token_lookback_taken
+
+    req.cur_kv_len = 3
+    next_input, _ = generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=False)
+    assert next_input.input_ids.tolist() == [3]
+    assert next_input.token_lookback == []
+
+
+def test_overlap_prefill_balances_request_token_load_without_padding():
     reqs = [
         _make_prefill_req(req_idx=0, token_num=8),
         _make_prefill_req(req_idx=1, token_num=7),
@@ -110,8 +121,7 @@ def test_overlap_prefill_balances_request_token_load_without_padding(monkeypatch
     assert model_input1.batch_size == 2
 
 
-def test_overlap_prefill_balances_single_token_request_normally(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
+def test_overlap_prefill_balances_single_token_request_normally():
     req = _make_prefill_req(req_idx=7, token_num=1)
 
     (
@@ -131,8 +141,7 @@ def test_overlap_prefill_balances_single_token_request_normally(monkeypatch):
     assert model_input1.b_req_idx.shape == (0,)
 
 
-def test_overlap_decode_builds_two_unpadded_inputs(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
+def test_overlap_decode_builds_two_unpadded_inputs():
     reqs = [_make_decode_req(req_idx=index) for index in range(3)]
 
     (
@@ -154,8 +163,7 @@ def test_overlap_decode_builds_two_unpadded_inputs(monkeypatch):
     assert model_input1.b_req_idx.tolist() == [2]
 
 
-def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
+def test_overlap_decode_preserves_empty_microbatch():
     req = _make_decode_req(req_idx=7)
 
     (

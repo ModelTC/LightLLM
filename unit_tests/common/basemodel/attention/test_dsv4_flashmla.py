@@ -10,8 +10,11 @@ import torch
 
 pytest.importorskip("flash_mla")
 
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att.sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
 from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
 
 @pytest.fixture(autouse=True)
@@ -48,17 +51,11 @@ assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.module
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
 def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
     backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
+    swa_config = FP8E8M0SlidingWindowConfig(
+        logical_layer_ids=(0, 1, 2), window_size=128, kv_dim=512, rope_dim=64, tp_world_size=4
+    )
     model = SimpleNamespace(
         args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
-        config=dict(
-            compress_ratios=[0, 4, 128],
-            head_dim=512,
-            qk_rope_head_dim=64,
-            index_head_dim=128,
-            sliding_window=128,
-        ),
-        layers_infer=[SimpleNamespace(layer_num_=layer) for layer in range(3)],
-        tp_rank_=0,
         tp_world_size_=4,
         batch_max_tokens=4096,
         max_req_num=8,
@@ -69,7 +66,7 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         "get_gpu_workspace_buffer",
         lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
     )
-    workspace, capacity = backend_class.get_swa_prefill_workspace(model=model)
+    workspace, capacity = backend_class.get_swa_prefill_workspace(model=model, swa_config=swa_config)
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
     assert workspace is not None
     if run_mode == "decode":
@@ -96,12 +93,20 @@ def _pool(page_size, pages):
 def _case(heads, ratio):
     torch.manual_seed(6014)
     tokens = 5
+    config = dict(
+        compress_ratios=[0, 4, 128], head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128
+    )
     model = type("TestModel", (), {})()
-    model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
-    model.config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
-    model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
-    model.tp_rank_ = 0
+    model.config = {"num_attention_heads": heads}
     model.tp_world_size_ = 1
+    model.att_state_role = "main"
+    model.att_state_manager = AttentionStateManager(request_capacity=1)
+    args = SimpleNamespace(llm_kv_type="fp8kv_dsa", page_size=256, mtp_step=0)
+    full_states = DeepseekV4TpPartModel.create_full_att_states(config, args, (0, 1, 2))
+    bounded_states = DeepseekV4TpPartModel.create_bounded_att_states(config, args, (0, 1, 2), device="meta")
+    for cache_state in (*full_states, *bounded_states):
+        model.att_state_manager.register_state(model.att_state_role, cache_state)
+    model.att_state_manager.finish_state_registration()
     backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
     q = torch.randn((tokens, backend.padded_q_head_num, 512), dtype=torch.bfloat16, device="cuda") * 0.1
     q[:, heads:] = 0
@@ -127,7 +132,7 @@ def _case(heads, ratio):
         extra_indices=extra_indices,
         extra_lengths=lengths.clone() if ratio else None,
     )
-    # The attention backend receives all cache inputs through k, without a memory manager.
+    # The attention call receives raw cache tensors while the backend uses registered layouts.
     state_info = SimpleNamespace()
     return backend, state_info, q, (pool, extra), decoded, extra_decoded, params
 

@@ -8,6 +8,7 @@ from lightllm.common.attention_state.full_att.compressed_att.compressed_att_stat
     CompressedAttentionState,
     CompressedAttentionLayerView,
 )
+from .triton_kernel.norm_rope import gather_rope_tables
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 
@@ -107,10 +108,20 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         if self.is_prefill:
             self.prefill_att_state.prepare_swa_workspace(self)
         pos = self.position_ids
-        self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
-        self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
-        self.position_cos_compress = torch.index_select(model._cos_cached_compress, 0, pos)
-        self.position_sin_compress = torch.index_select(model._sin_cached_compress, 0, pos)
+        (
+            self.position_cos_sliding,
+            self.position_sin_sliding,
+            self.position_cos_compress,
+            self.position_sin_compress,
+        ) = gather_rope_tables(
+            pos,
+            (
+                model._cos_cached_sliding,
+                model._sin_cached_sliding,
+                model._cos_cached_compress,
+                model._sin_cached_compress,
+            ),
+        )
         # Per-token request id (decode: one token per req; prefill: ragged -> repeat by q-len).
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:

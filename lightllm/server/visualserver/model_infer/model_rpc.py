@@ -15,6 +15,7 @@ from lightllm.models.llava.llava_visual import LlavaVisionModel
 from lightllm.models.gemma3.gemma3_visual import Gemma3VisionModel
 from lightllm.models.gemma4.gemma4_visual import Gemma4VisionModel
 from lightllm.models.deepseek_v4.deepseek_v4_visual import DeepseekV4VisionModel
+from lightllm.models.deepseek_v41.deepseek_v41_visual import DeepseekV41VisionModel
 from lightllm.models.vit.model import VisionTransformer
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrainedModel
@@ -98,6 +99,11 @@ class VisualModelRpcServer(rpyc.Service):
                 )
             elif self.model_type == "deepseek_v4" and model_cfg.get("vision_n_layers", 0) > 0:
                 self.model = DeepseekV4VisionModel(kvargs, **model_cfg).eval()
+            elif (
+                self.model_type == "deepseek_v41"
+                and (model_cfg.get("vision_config") or {}).get("num_hidden_layers", 0) > 0
+            ):
+                self.model = DeepseekV41VisionModel(kvargs, **model_cfg).eval()
             elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
                 self.model = TarsierVisionTransformerPretrainedModel(**model_cfg).eval().bfloat16()
             elif self.model_type == "llava":

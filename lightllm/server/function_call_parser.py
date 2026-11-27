@@ -41,6 +41,7 @@ TOOLS_TAG_LIST = [
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
     "<｜DSML｜tool_calls>",
+    "<｜DSML｜ calls>",
 ]
 
 
@@ -1431,9 +1432,10 @@ class DeepSeekV32Detector(BaseFormatDetector):
     Reference: https://huggingface.co/deepseek-ai/DeepSeek-V3.2
     """
 
+    dsml_token = "｜DSML｜"
+
     def __init__(self):
         super().__init__()
-        self.dsml_token = "｜DSML｜"
         self.bot_token = f"<{self.dsml_token}function_calls>"
         self.eot_token = f"</{self.dsml_token}function_calls>"
         self.invoke_start_prefix = f"<{self.dsml_token}invoke"
@@ -1995,6 +1997,73 @@ class DeepSeekV4Detector(DeepSeekV32Detector):
         self.eot_token = f"</{self.dsml_token}tool_calls>"
 
 
+class DeepSeekV41Detector(DeepSeekV32Detector):
+    """V4.1 uses space-prefixed DSML tags inside a calls wrapper."""
+
+    dsml_token = "｜DSML｜ "
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = f"<{self.dsml_token}calls>"
+        self.eot_token = f"</{self.dsml_token}calls>"
+        self.current_tool_id = 0
+
+    def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
+        # Buffer each invoke until its arguments can be emitted as complete JSON.
+        self._buffer += new_text
+        normal_parts, calls = [], []
+        while self._buffer:
+            if not self._in_function_calls:
+                start = self._buffer.find(self.bot_token)
+                if start == -1:
+                    partial = self._ends_with_partial_token(self._buffer, self.bot_token)
+                    normal_parts.append(self._buffer[:-partial] if partial else self._buffer)
+                    self._buffer = self._buffer[-partial:] if partial else ""
+                    break
+                normal_parts.append(self._buffer[:start])
+                self._buffer = self._buffer[start + len(self.bot_token) :]
+                self._in_function_calls = True
+
+            block_end = self._buffer.find(self.eot_token)
+            body_end = len(self._buffer) if block_end == -1 else block_end
+            invoke = None
+            if self._buffer.find(self.invoke_end_token, 0, body_end) != -1:
+                invoke = self.invoke_regex.search(self._buffer, 0, body_end)
+            if invoke is not None:
+                name, body = invoke.groups()
+                if name in self._get_tool_indices(tools):
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=None if self.current_tool_name_sent else name,
+                            parameters=self._dsml_params_to_json(self.param_regex.findall(body)),
+                        )
+                    )
+                    self.current_tool_id += 1
+                else:
+                    logger.warning(f"Model attempted to call undefined function: {name}")
+                self.current_tool_name_sent = False
+                self._buffer = self._buffer[invoke.end() :]
+                continue
+
+            if block_end != -1:
+                if self.current_tool_name_sent:
+                    self.current_tool_id += 1
+                self.current_tool_name_sent = False
+                self._in_function_calls = False
+                self._buffer = self._buffer[block_end + len(self.eot_token) :]
+                continue
+
+            if not self.current_tool_name_sent:
+                match = self.partial_invoke_regex.search(self._buffer)
+                if match and match.group(1) in self._get_tool_indices(tools):
+                    calls.append(ToolCallItem(tool_index=self.current_tool_id, name=match.group(1), parameters=""))
+                    self.current_tool_name_sent = True
+            break
+
+        return StreamingParseResult(normal_text="".join(normal_parts), calls=calls)
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -2009,6 +2078,7 @@ class FunctionCallParser:
         "deepseekv31": DeepSeekV31Detector,
         "deepseekv32": DeepSeekV32Detector,
         "deepseekv4": DeepSeekV4Detector,
+        "deepseekv41": DeepSeekV41Detector,
         "glm47": Glm47Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,
@@ -2019,14 +2089,11 @@ class FunctionCallParser:
     }
 
     def __init__(self, tools: List[Tool], tool_call_parser: str):
-        detector: Type[BaseFormatDetector] = None
         detector_class = self.ToolCallParserEnum.get(tool_call_parser)
-        if detector_class:
-            detector = detector_class()
-        else:
+        if detector_class is None:
             raise ValueError(f"Unsupported tool_call_parser: {tool_call_parser}")
 
-        self.detector = detector
+        self.detector = detector_class()
         self.tools = tools
 
     def has_tool_call(self, text: str) -> bool:

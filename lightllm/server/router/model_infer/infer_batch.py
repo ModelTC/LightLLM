@@ -5,7 +5,7 @@ import pickle
 
 from sortedcontainers import SortedDict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
+from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union, Sequence
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.utils.infer_utils import mark_start, mark_end
@@ -46,6 +46,7 @@ class InferenceContext:
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
     output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
+    token_lookback_depth: int = 0
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
@@ -58,6 +59,7 @@ class InferenceContext:
         shm_req_manager: ShmReqManager,
         vocab_size: int,
         cache_placement_controller: Optional[CachePlacementController] = None,
+        token_lookback_depth: int = 0,
     ):
         self.args = get_env_start_args()
         self.backend: ModeBackend = backend
@@ -67,6 +69,7 @@ class InferenceContext:
         self.radix_cache = radix_cache
         self.shm_req_manager = shm_req_manager
         self.cache_placement_controller = cache_placement_controller
+        self.token_lookback_depth = token_lookback_depth
 
         self.requests_mapping = {}
         self.infer_req_ids = []
@@ -161,6 +164,8 @@ class InferenceContext:
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
+        # A later cache match starts a new KV binding and must collect its own prefix tail.
+        req.token_lookback_taken = False
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         # 待释放列表已持有 CPU 快照或 GPU 行视图；reset 清理扩展状态，不改写 GPU 表。
@@ -617,6 +622,7 @@ class InferReq:
         if self.sampling_param.pd_decode_node is not None:
             self.pd_trans_kv_start_index = self.sampling_param.pd_decode_node.ready_kv_len
 
+        self.token_lookback_taken = False
         self.cur_kv_len = 0
         self.cur_output_len = 0
         self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
@@ -833,6 +839,20 @@ class InferReq:
 
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+
+    def take_token_lookback(self) -> Sequence[tuple[int, int, int]]:
+        """Consume the cached prefix tail when preparing the first forward for this KV binding."""
+        depth = g_infer_context.token_lookback_depth
+        if not depth or self.token_lookback_taken:
+            return ()
+        # The first forward will record its own tokens even when the cached prefix is empty.
+        self.token_lookback_taken = True
+        cached_prefix_len = self.cur_kv_len
+        if not cached_prefix_len:
+            return ()
+        start = max(0, cached_prefix_len - depth)
+        token_ids = self.get_input_token_ids()[start:cached_prefix_len].tolist()
+        return [(self.req_idx, position, token_id) for position, token_id in enumerate(token_ids, start)]
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len

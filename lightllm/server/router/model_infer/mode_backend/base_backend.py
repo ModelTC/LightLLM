@@ -22,6 +22,7 @@ from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
 from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
+from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -222,6 +223,7 @@ class ModeBackend:
             shm_req_manager=self.shm_req_manager,
             vocab_size=self.model.vocab_size,
             cache_placement_controller=cache_placement_controller,
+            token_lookback_depth=getattr(self.model, "token_lookback_depth", 0),
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
@@ -689,9 +691,9 @@ class ModeBackend:
         if not is_decode:
             return False
 
-        if strict_prefill:
-            is_at_prompt_boundary = req.cur_kv_len + 1 == req.shm_req.input_len
-            if is_at_prompt_boundary:
+        if req.cur_output_len == 0:
+            # The decode embedding only accepts text. A cached/chunked prompt may end in an image or audio slot.
+            if strict_prefill or req.shm_req.shm_prompt_ids.arr[req.cur_kv_len] >= MULTIMODAL_TOKEN_ID_START:
                 return False
 
         return True
@@ -711,7 +713,7 @@ class ModeBackend:
                 用于 PD Prefill 节点，确保缓存命中后仅剩一个 token 的 prompt 仍执行 prefill。
             strict_prefill: 为 True 时，满足 decode 判定但位于 prompt 边界
                 （cur_kv_len + 1 == input_len）的请求仍按 prefill 处理；
-                为 False 时，该请求按 decode 处理。no_decode=True 时优先遵循 no_decode。
+                为 False 时，末尾为文本 token 的请求按 decode 处理。no_decode=True 时优先遵循 no_decode。
             recover_paused: 是否在本轮请求选择完成后尝试恢复已暂停的请求。
                 恢复后的请求从后续调度轮次开始参与选择。
 

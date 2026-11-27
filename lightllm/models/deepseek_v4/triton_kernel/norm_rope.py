@@ -12,6 +12,39 @@ from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 
 @triton.jit
+def _gather_rope_tables_kernel(
+    position_ids,
+    tables,
+    out,
+    rows,
+    POS_STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    TABLE_STRIDES: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    size = rows * WIDTH
+    valid = offset < size
+    position = tl.load(position_ids + (offset // WIDTH) * POS_STRIDE, mask=valid, other=0)
+    column = offset % WIDTH
+    for index in tl.static_range(4):
+        stride_row, stride_col = TABLE_STRIDES[index]
+        value = tl.load(tables[index] + position * stride_row + column * stride_col, mask=valid, other=0)
+        tl.store(out + index * size + offset, value, mask=valid)
+
+
+def gather_rope_tables(position_ids: torch.Tensor, tables: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, ...]:
+    rows, width = position_ids.numel(), tables[0].shape[1]
+    out = torch.empty((4, rows, width), dtype=tables[0].dtype, device=position_ids.device)
+    block = 256
+    if rows:
+        _gather_rope_tables_kernel[(triton.cdiv(rows * width, block),)](
+            position_ids, tables, out, rows, position_ids.stride(0), width, tuple(t.stride() for t in tables), block
+        )
+    return out.unbind(0)
+
+
+@triton.jit
 def _q_norm_rope_kernel(
     q_input,
     q_output,
@@ -27,7 +60,7 @@ def _q_norm_rope_kernel(
 ):
     row = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
     dim = tl.arange(0, 512)
-    batch = row // NUM_HEADS
+    batch = (row // NUM_HEADS).to(tl.int64)
     head = row % NUM_HEADS
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
@@ -73,6 +106,7 @@ def _kv_norm_rope_to_swa_kernel(
     SWA_PAGE_TOKEN_NUM: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
     WRITE_SWA_RUNTIME: tl.constexpr,
+    BF16_ROUNDING: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -81,8 +115,12 @@ def _kv_norm_rope_to_swa_kernel(
         tl.extra.cuda.gdc_wait()
     x = tl.load(kv + row * kv_stride + dim).to(tl.float32)
     w = tl.load(kv_norm_weight + dim).to(tl.float32)
-    norm = tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    norm = (
+        1 / tl.sqrt(tl.sum(x * x, axis=0) / 512 + EPS) if BF16_ROUNDING else tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    )
     x = x * norm * w
+    if BF16_ROUNDING:
+        x = x.to(tl.bfloat16).to(tl.float32)
     groups = tl.arange(0, 8)
     cols = tl.arange(0, 64)
     grouped = tl.reshape(x, (8, 64))
@@ -101,6 +139,8 @@ def _kv_norm_rope_to_swa_kernel(
     rope = tl.reshape(
         tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
     )
+    if BF16_ROUNDING:
+        rope = rope.to(tl.bfloat16).to(tl.float32)
     for destination in tl.static_range(2 if WRITE_SWA_RUNTIME else 1):
         slot = tl.load(swa_write_slots + row) if destination == 0 else tl.load(swa_runtime_write_slots + row)
         slot = slot.to(tl.int64)
@@ -203,6 +243,7 @@ def fused_kv_norm_rope_to_swa(
     swa_page_token_num,
     swa_runtime_write_slots=None,
     req_to_swa=None,
+    bf16_rounding=False,
 ):
     """将 BF16 KV [T, 512] 归一化、旋转并写入 packed SWA。
 
@@ -213,6 +254,12 @@ def fused_kv_norm_rope_to_swa(
     slot. NoPE uses FP8 with UE8M0 scales; the last 64 dimensions use BF16 RoPE.
     """
     if kv.shape[0]:
+        if bf16_rounding:
+            from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
+
+            num_warps = rmsnorm_num_warps
+        else:
+            num_warps = 1 if kv.shape[0] >= 512 else 8
         flat = swa_kv_buffer.view(-1)
         _kv_norm_rope_to_swa_kernel[(kv.shape[0],)](
             kv,
@@ -228,7 +275,8 @@ def fused_kv_norm_rope_to_swa(
             SWA_PAGE_TOKEN_NUM=swa_page_token_num,
             PAGE_BYTES=swa_kv_buffer.shape[-1],
             WRITE_SWA_RUNTIME=swa_runtime_write_slots is not None,
-            num_warps=1 if kv.shape[0] >= 512 else 8,
+            BF16_ROUNDING=bf16_rounding,
+            num_warps=num_warps,
             num_stages=1,
             **get_pdl_launch_kwargs(kv.device),
         )
