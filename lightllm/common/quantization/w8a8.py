@@ -21,6 +21,7 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
 _INT8_HOPPER_4096_CONFIG = dict(BLOCK_M=64, BLOCK_N=128, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=4)
+_FP8_HOPPER_4096_CONFIG = dict(BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, GROUP_M=8, num_warps=4, num_stages=3)
 
 
 @triton.jit
@@ -219,6 +220,24 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         x_q, x_scale = quantize_fp8_per_row(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
+        if (
+            x_q.shape == (512, 4096)
+            and n == 4096
+            and out is not None
+            and out.shape == (m, n)
+            and out.is_contiguous()
+            and out.dtype == input_tensor.dtype
+            and out.dtype in (torch.float16, torch.bfloat16)
+            and qweight.T.is_contiguous()
+            and weight_scale.numel() == n
+            and weight_scale.is_contiguous()
+            and (bias is None or (bias.shape == (n,) and bias.dtype == out.dtype and bias.is_contiguous()))
+            and is_hopper()
+            and triton_support_tensor_descriptor()
+        ):
+            return fp8_scaled_mm_per_token(
+                x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_FP8_HOPPER_4096_CONFIG, bias=bias
+            )
         result = _sgl_scaled_mm(
             getattr(sgl_ops, "fp8_scaled_mm", None), x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out, bias
         )

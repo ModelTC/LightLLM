@@ -48,3 +48,30 @@ def test_int8_triton_out(monkeypatch, rows, width, depth, dtype, with_bias):
     if bias is not None:
         expected += bias.float()
     torch.testing.assert_close(output, expected.to(dtype), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fp8_triton_out(monkeypatch, dtype):
+    if not torch.cuda.is_available() or not is_hopper() or not triton_support_tensor_descriptor():
+        pytest.skip("requires Hopper TMA")
+    torch.manual_seed(1767)
+    inputs = torch.randn((512, 4096), device="cuda", dtype=dtype)
+    weight = torch.randn((4096, 4096), device="cuda").to(torch.float8_e4m3fn)
+    scales = torch.rand((4096,), device="cuda", dtype=torch.float32) / 127
+    bias = torch.randn((4096,), device="cuda", dtype=dtype) / 16
+    pack = WeightPack(weight=weight, weight_scale=scales)
+    output = torch.empty_like(inputs)
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
+    method = w8a8.FP8w8a8QuantizationMethod()
+    monkeypatch.setattr(w8a8, "_sgl_scaled_mm", lambda *args: pytest.fail("expected Triton"))
+
+    assert method.apply(inputs, pack, out=output, bias=bias) is output
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        method.apply(inputs, pack, out=output, bias=bias)
+    inputs.mul_(-1)
+    graph.replay()
+
+    quantized, input_scales = w8a8.quantize_fp8_per_row(inputs)
+    expected = (quantized.float() @ weight.float().t()) * input_scales * scales + bias.float()
+    torch.testing.assert_close(output, expected.to(dtype), rtol=0.016, atol=0.004)
