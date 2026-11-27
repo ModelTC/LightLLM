@@ -19,6 +19,9 @@ import pytest
 
 from lightllm.utils.start_utils import kill_recursive
 
+PD_TEST_REGISTER_TOKEN = "test-pd-secret"
+PD_TEST_NODE_ADDRESSES = {"prefill": "prefill.internal:18001", "decode": "decode.internal:18002"}
+
 
 def get_test_haproxy_binary():
     try:
@@ -153,6 +156,10 @@ def running_pd_master(runtime_dir: Path, *, extra_args=(), wait_for_startup=True
     command.extend(extra_args)
     env = os.environ.copy()
     env.update(CUDA_VISIBLE_DEVICES="", HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", TOKENIZERS_PARALLELISM="false")
+    env.update(
+        LIGHTLLM_PD_REGISTER_TOKEN=PD_TEST_REGISTER_TOKEN,
+        LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES=json.dumps(list(PD_TEST_NODE_ADDRESSES.values())),
+    )
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
     opener = build_opener(ProxyHandler({}))
     public_url = f"http://127.0.0.1:{public_port}"

@@ -25,7 +25,9 @@ def _ws(node):
 
 @pytest.mark.usefixtures("single_http_worker_start_args")
 @pytest.mark.parametrize("connection_id", [None, "reused-id"])
-def test_old_connection_cleanup_wakes_only_its_requests_and_keeps_replacement(connection_id):
+def test_old_connection_cleanup_wakes_only_its_requests_and_keeps_replacement(monkeypatch, connection_id):
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["p:8000"]')
+
     async def run():
         args = StartArgs()
         registry = PDManager(args)
