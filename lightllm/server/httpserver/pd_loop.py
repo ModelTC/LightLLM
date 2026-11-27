@@ -160,7 +160,16 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
                         generation_task.add_done_callback(remove_prefill_first_task)
                     elif obj[0] == ObjType.PD_PF_DECODE_KV_READY:
+                        from lightllm.server.httpserver.pd_pf_prefill_node import (
+                            write_prefill_first_decode_node_info,
+                        )
+
                         _, ready_group_req_id, decode_node_info = obj
+                        write_prefill_first_decode_node_info(
+                            manager=manager,
+                            group_request_id=ready_group_req_id,
+                            decode_node_info=decode_node_info,
+                        )
                         decode_kv_ready_event = decode_kv_ready_events.pop(ready_group_req_id, None)
                         if decode_kv_ready_event is None:
                             logger.error(f"error in find decode_kv_ready_event, info: {obj}")

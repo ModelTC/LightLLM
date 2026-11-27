@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus
+from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
 from lightllm.server.pd_report.manager import PdReportManager
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_trans_process
 
@@ -102,6 +102,36 @@ def test_pd_report_connects_with_protocol_ping(monkeypatch):
     asyncio.run(run())
     assert seen["ping_interval"] == 60
     assert seen["ping_timeout"] == 60
+
+
+def test_push_prefill_first_kv_ready_sends_prompt():
+    from lightllm.server.pd_report import prefill_kv_ready
+
+    sent = []
+    prefill_kv_ready._prefill_kv_ready_push = SimpleNamespace(send=lambda message: sent.append(message))
+    req = SimpleNamespace(
+        shm_req=SimpleNamespace(
+            sample_params=SimpleNamespace(group_request_id=9),
+            get_prompt_ids=lambda: [3, 4],
+        ),
+        sampling_param=SimpleNamespace(pd_master_node_id=100),
+    )
+    try:
+        prefill_kv_ready.push_prefill_first_kv_ready(req=req)
+    finally:
+        prefill_kv_ready._prefill_kv_ready_push = None
+
+    assert sent == [PdPfPrefillKvReady(group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)]
+
+
+def test_pd_report_routes_prefill_kv_ready_by_master_id():
+    manager = PdReportManager(args=SimpleNamespace(), pull=None)
+    manager._queues[100] = asyncio.Queue()
+    ready = PdPfPrefillKvReady(group_request_id=9, prompt_ids=[1, 2], pd_master_node_id=100)
+
+    _deliver(manager, [ready])
+
+    assert manager._queues[100].get_nowait() == (ObjType.PD_PF_PREFILL_KV_READY, ready)
 
 
 def test_pd_report_routes_the_handshake_by_master_id():

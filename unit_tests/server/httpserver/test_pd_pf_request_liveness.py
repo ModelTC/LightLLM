@@ -10,7 +10,10 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
-from lightllm.server.httpserver.pd_pf_prefill_node import run_pd_pf_prefill_request
+from lightllm.server.httpserver.pd_pf_prefill_node import (
+    run_pd_pf_prefill_request,
+    write_prefill_first_decode_node_info,
+)
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
@@ -398,48 +401,54 @@ def test_prefill_token_is_taken_when_decode_output_is_ahead():
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-@pytest.mark.parametrize("scheduled", [True, False])
-def test_last_chunk_reports_prompt_once_and_transfers_only_after_prefill(scheduled):
+def test_decode_node_info_is_written_when_the_notification_arrives():
+    transfer = Mock()
+    requests = {
+        GROUP_ID: SimpleNamespace(
+            group_req_objs=SimpleNamespace(
+                shm_req_objs=[
+                    SimpleNamespace(sample_params=SimpleNamespace(pd_kv_trans_params=SimpleNamespace(set=transfer)))
+                ]
+            )
+        )
+    }
+    info = SimpleNamespace(ready_kv_len=3)
+    manager = SimpleNamespace(req_id_to_out_inf=requests)
+    wrote = write_prefill_first_decode_node_info(manager=manager, group_request_id=GROUP_ID, decode_node_info=info)
+    assert wrote is True
+    payload = transfer.call_args.args[0]
+    assert pickle.loads(payload).ready_kv_len == 3
+
+    missing = write_prefill_first_decode_node_info(
+        manager=SimpleNamespace(req_id_to_out_inf={}),
+        group_request_id=GROUP_ID,
+        decode_node_info=info,
+    )
+    assert missing is False
+
+
+def test_session_does_not_poll_for_prefill_kv_ready():
     async def run():
         params = SamplingParams()
         params.init(None, max_new_tokens=1)
         params.group_request_id = GROUP_ID
-        reported = asyncio.Event()
-        transfer = Mock()
-        shm_req = SimpleNamespace(
-            shm_prompt_ids=SimpleNamespace(arr=[11, 12, 0]),
-            input_len=2,
-            pd_last_chunk_scheduled=False,
-            sample_params=SimpleNamespace(pd_kv_trans_params=SimpleNamespace(set=transfer)),
-        )
-        requests = {GROUP_ID: SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[shm_req]))}
-        transfer.side_effect = lambda payload: requests.pop(GROUP_ID)
+        requests = {GROUP_ID: SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[SimpleNamespace()]))}
         decode_ready = asyncio.Event()
         decode_ready.decode_node_info = SimpleNamespace(ready_kv_len=0)
         decode_ready.set()
 
         async def generate(**kwargs):
-            if scheduled:
-                shm_req.pd_last_chunk_scheduled = True
-                await reported.wait()
-                transfer.assert_not_called()
             yield _token("first", 1, FinishStatus.FINISHED_LENGTH)
-
-        async def send(payload):
-            kind, ready = pickle.loads(payload)
-            assert kind == ObjType.PD_PF_PREFILL_KV_READY
-            assert ready.group_request_id == GROUP_ID and ready.prompt_ids == [11, 12]
-            reported.set()
+            requests.pop(GROUP_ID, None)
 
         manager = SimpleNamespace(
             args=SimpleNamespace(run_mode="prefill"), req_id_to_out_inf=requests, generate=generate
         )
-        ws = SimpleNamespace(send=AsyncMock(side_effect=send))
+        ws = SimpleNamespace(send=AsyncMock())
         await run_pd_pf_prefill_request(
             manager, "prompt", params, MultimodalParams(), asyncio.Queue(), ws, decode_ready
         )
-        ws.send.assert_awaited_once()
-        transfer.assert_called_once()
+        ws.send.assert_not_awaited()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 

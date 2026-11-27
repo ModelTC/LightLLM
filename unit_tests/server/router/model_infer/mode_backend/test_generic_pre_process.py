@@ -13,6 +13,7 @@ def _patch_empty_input_context(monkeypatch):
     )
     infer_context = SimpleNamespace(
         args=SimpleNamespace(page_size=1, run_mode="normal"),
+        backend=None,
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,
             mem_manager=mem_manager,
@@ -222,6 +223,35 @@ def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch
 
     generic_pre_process.prepare_prefill_inputs([reqs[0]], is_chuncked_mode=False)
     assert reqs[0].shm_req.pd_last_chunk_scheduled
+
+
+def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
+    context = _patch_empty_input_context(monkeypatch)
+    context.args.run_mode = "prefill"
+    context.backend = SimpleNamespace(rank_in_dp=0)
+    reported = []
+    monkeypatch.setattr(generic_pre_process, "push_prefill_first_kv_ready", lambda req: reported.append(req))
+    req = _make_prefill_req(req_idx=1, token_num=8)
+    req.cur_kv_len = 6
+    req.shm_req = SimpleNamespace(
+        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
+    )
+
+    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
+    generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)
+
+    assert reported == [req]
+    assert req.shm_req.pd_last_chunk_scheduled is True
+
+    context.backend = SimpleNamespace(rank_in_dp=1)
+    other = _make_prefill_req(req_idx=2, token_num=8)
+    other.cur_kv_len = 6
+    other.shm_req = SimpleNamespace(
+        input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True), pd_last_chunk_scheduled=False
+    )
+    generic_pre_process.prepare_prefill_inputs([other], is_chuncked_mode=True)
+    assert reported == [req]
+    assert other.shm_req.pd_last_chunk_scheduled is False
 
 
 def test_decode_node_does_not_signal_last_chunk(monkeypatch):

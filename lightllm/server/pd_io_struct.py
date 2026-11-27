@@ -60,6 +60,8 @@ class PdPfPrefillKvReady:
 
     group_request_id: int
     prompt_ids: List[int]
+    # 本机 pd_report 用它选择 PD Master。经 /pd_report 送到目标之后，master 不再读这个字段。
+    pd_master_node_id: int = 0
 
 
 @dataclass

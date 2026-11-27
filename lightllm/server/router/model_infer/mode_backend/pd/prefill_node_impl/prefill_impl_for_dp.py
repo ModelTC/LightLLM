@@ -52,6 +52,9 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
             output_len=output_len,
         )
 
+    def _prefill_first_decode_kv_is_ready(self, req_obj: InferReq) -> bool:
+        return PDChunkedPrefillForPrefillNode._prefill_first_decode_kv_is_ready(self, req_obj=req_obj)
+
     def _on_pf_decode_kv_ready(self, req_id: int) -> None:
         return PDChunkedPrefillForPrefillNode._on_pf_decode_kv_ready(self, req_id=req_id)
 

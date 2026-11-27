@@ -1,4 +1,7 @@
-"""Decode 推理进程把上报推到这里，这里再写给目标 PD Master 的 /pd_report。"""
+"""推理进程把上报推到这里，这里再写给目标 PD Master 的 /pd_report。
+
+Decode 上报 KV 握手。Prefill 在最后一段被调度时上报 prompt，让 decode 开始占页。
+"""
 
 import asyncio
 import inspect
@@ -11,7 +14,7 @@ from typing import Dict
 import setproctitle
 
 from lightllm.server.core.objs import StartArgs
-from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus, PD_Master_Obj
+from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus, PdPfPrefillKvReady, PD_Master_Obj
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_unique_server_name
 from lightllm.utils.graceful_utils import graceful_registry
@@ -34,10 +37,10 @@ def start_pd_report_process(args: StartArgs, pipe_writer: Connection) -> None:
 
 
 class PdReportManager:
-    """把本机 Decode 推理进程的 KV 握手转到对应 PD Master 的 /pd_report。
+    """把本机推理进程的上报转到对应 PD Master 的 /pd_report。
 
-    本地 ZMQ PULL 收到 PDUpKVStatus 后，按它自己的 pd_master_node_id 放进该 Master
-    的发送队列。每个 Master 一条 websocket，断线只重连这一条，不碰其他 Master。
+    本地 ZMQ PULL 收到上报后，按它自己的 pd_master_node_id 放进该 Master 的发送队列。
+    每个 Master 一条 websocket，断线只重连这一条，不碰其他 Master。
     """
 
     def __init__(self, args: StartArgs, pull: ReportIpc.Pull) -> None:
@@ -72,19 +75,25 @@ class PdReportManager:
             logger.info("pd report manager stopped")
 
     async def _recv_reports(self) -> None:
-        """从本地 PULL 收 PDUpKVStatus，按它的 pd_master_node_id 放进对应发送队列。
+        """从本地 PULL 收上报，按 pd_master_node_id 放进对应发送队列。
 
-        收到的不是这个对象，说明本机通道坏了，记日志后退出进程。目标 Master 还没有队列时先建一个，
-        握手留在里面，等连接建立后由发送循环写出。收包或反序列化失败由 PULL 记日志并退出进程。
+        Decode 的是 PDUpKVStatus，Prefill 最后一段的是 PdPfPrefillKvReady。
+        收到别的对象，说明本机通道坏了，记日志后退出进程。目标 Master 还没有队列时先建一个，
+        上报留在里面，等连接建立后由发送循环写出。收包或反序列化失败由 PULL 记日志并退出进程。
         本循环被取消时，CancelledError 继续向外抛。
         """
         logger.info("pd report recv loop started")
         while True:
             status = await self._pull.recv()
-            if not isinstance(status, PDUpKVStatus):
+            if isinstance(status, PDUpKVStatus):
+                master_id = status.pd_master_node_id
+                item = (ObjType.PD_UPLOAD_KV_STATUS, status)
+            elif isinstance(status, PdPfPrefillKvReady):
+                master_id = status.pd_master_node_id
+                item = (ObjType.PD_PF_PREFILL_KV_READY, status)
+            else:
                 logger.error(f"pd report dropped malformed local message {status!r}")
                 os._exit(1)
-            master_id = status.pd_master_node_id
             queue = self._queues.get(master_id)
             # 连接可能还没建立。先备好队列把这条握手留住，等 _serve_master 连上再发。
             if queue is None:
@@ -100,8 +109,8 @@ class PdReportManager:
                         self._queues.pop(master_id, None)
 
                 asyncio.create_task(drop_if_absent(master_id=master_id, queue=queue))
-            queue.put_nowait((ObjType.PD_UPLOAD_KV_STATUS, status))
-            logger.info(f"pd report queued upkv_status for master {master_id}: {status}")
+            queue.put_nowait(item)
+            logger.info(f"pd report queued {item[0].name} for master {master_id}: {status}")
 
     async def _watch_masters(self) -> None:
         """每 30 秒按当前 PD Master 列表对齐连接。

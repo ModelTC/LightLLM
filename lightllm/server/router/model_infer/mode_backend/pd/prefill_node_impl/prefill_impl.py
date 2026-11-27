@@ -1,8 +1,11 @@
+import torch
 import torch.multiprocessing as mp
 from typing import List
+from lightllm.distributed.communication_op import broadcast
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -18,6 +21,9 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
     def init_custom(self):
         assert kv_trans_use_p2p()
+        if self.dp_world_size > 1:
+            self._pd_decode_kv_ready_tensor = torch.empty(1, dtype=torch.int32, device="cuda")
+            self._pd_decode_kv_ready_group = create_new_group_for_current_dp("nccl")
         return
 
     def _filter_not_ready_reqs(self, req_ids: List[int]) -> List[InferReq]:
@@ -139,11 +145,26 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     def _pf_prefill_chuncked_handle_func(
         self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
     ) -> None:
-        """PD 分离的 Prefill 先推理模式的请求不算边传。算完后把建传输任务的闭包挂到等待属性上。"""
+        """PD 分离的 Prefill 先推理模式的请求不算边传。算完后把建传输任务的闭包挂到等待属性上。
+
+        端点若已经写入共享内存，本 DP 组的 master 读 ``data_len`` 并广播给同组其他 rank，
+        大家一起建传输任务。否则仍挂闭包，等 Router 的通知。
+        """
         prefill_finished = req_obj.cur_kv_len == req_obj.shm_req.input_len
         if not prefill_finished or output_len < 1:
             return
         if hasattr(req_obj, "pd_wait_decode_kv_info_ready"):
+            return
+        if self._prefill_first_decode_kv_is_ready(req_obj=req_obj):
+            if not req_obj.infer_aborted:
+                from ..helper import submit_prefill_first_tasks_if_ready
+
+                submit_prefill_first_tasks_if_ready(
+                    backend=self,
+                    req_obj=req_obj,
+                    next_token_id=next_token_id,
+                    next_token_logprob=next_token_prob,
+                )
             return
 
         def wait_decode_kv_info_ready(backend, req_obj: InferReq) -> None:
@@ -159,6 +180,21 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         req_obj.pd_wait_decode_kv_info_ready = wait_decode_kv_info_ready
         return
+
+    def _prefill_first_decode_kv_is_ready(self, req_obj: InferReq) -> bool:
+        """本 DP 组的 master 读共享内存，再把结果广播给同组其他 rank。"""
+        if self.dp_world_size == 1:
+            return req_obj.sampling_param.shm_param.pd_kv_trans_params.data_len > 0
+        if self.is_master_in_dp:
+            ready = req_obj.sampling_param.shm_param.pd_kv_trans_params.data_len > 0
+            self._pd_decode_kv_ready_tensor.fill_(int(ready))
+        broadcast(
+            tensor=self._pd_decode_kv_ready_tensor,
+            src=self.global_rank - self.rank_in_dp,
+            group=self._pd_decode_kv_ready_group,
+            async_op=False,
+        )
+        return bool(self._pd_decode_kv_ready_tensor.item())
 
     def _on_pf_decode_kv_ready(self, req_id: int) -> None:
         """Router 通知 decode KV 已就绪。调用等待闭包建传输任务，然后去掉这个属性。"""
