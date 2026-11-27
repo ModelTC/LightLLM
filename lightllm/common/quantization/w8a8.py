@@ -70,6 +70,24 @@ def quantize_fp8_per_row(input_tensor: torch.Tensor) -> Tuple[torch.Tensor, torc
     return quantized, scale
 
 
+def _use_fp8_hopper_4096(activation, weight, weight_scale, out, dtype, bias):
+    return (
+        activation.shape == (512, 4096)
+        and weight.shape == (4096, 4096)
+        and weight.T.is_contiguous()
+        and weight_scale.numel() in (1, 4096)
+        and weight_scale.is_contiguous()
+        and out is not None
+        and out.shape == (512, 4096)
+        and out.is_contiguous()
+        and out.dtype == dtype
+        and dtype in (torch.float16, torch.bfloat16)
+        and (bias is None or (bias.shape == (4096,) and bias.dtype == dtype and bias.is_contiguous()))
+        and is_hopper()
+        and triton_support_tensor_descriptor()
+    )
+
+
 class BaseQuantizationMethod(QuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -220,21 +238,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         x_q, x_scale = quantize_fp8_per_row(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
-        if (
-            x_q.shape == (512, 4096)
-            and n == 4096
-            and out is not None
-            and out.shape == (m, n)
-            and out.is_contiguous()
-            and out.dtype == input_tensor.dtype
-            and out.dtype in (torch.float16, torch.bfloat16)
-            and qweight.T.is_contiguous()
-            and weight_scale.numel() == n
-            and weight_scale.is_contiguous()
-            and (bias is None or (bias.shape == (n,) and bias.dtype == out.dtype and bias.is_contiguous()))
-            and is_hopper()
-            and triton_support_tensor_descriptor()
-        ):
+        if _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias):
             return fp8_scaled_mm_per_token(
                 x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_FP8_HOPPER_4096_CONFIG, bias=bias
             )
@@ -464,6 +468,9 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
                 out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
+        run_config = None
+        if _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias):
+            run_config = _FP8_HOPPER_4096_CONFIG
         return fp8_scaled_mm_per_token(
             x_q,
             qweight,
@@ -471,6 +478,7 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
             weight_scale,
             input_tensor.dtype,
             out,
+            run_config=run_config,
         )
 
     @property
@@ -486,6 +494,10 @@ class FP8w8a8PerTensorAutoQuantizationMethod(FP8w8a8PerTensorTritonQuantizationM
         weight, weight_scale, quantized, scales, _, channels = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
+        if _use_fp8_hopper_4096(quantized, weight, weight_scale, out, input_tensor.dtype, bias):
+            return fp8_scaled_mm_per_token(
+                quantized, weight, scales, weight_scale, out.dtype, out, run_config=_FP8_HOPPER_4096_CONFIG
+            )
         if weight_scale.numel() == 1:
             weight_scale = weight_scale.expand(channels).contiguous()
         result = sgl_ops.fp8_scaled_mm(quantized, weight, scales, weight_scale, input_tensor.dtype)
