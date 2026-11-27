@@ -84,6 +84,7 @@ def test_caller_globs_find_the_attention_callers():
         "lightllm/models/qwen3next/layer_infer/transformer_layer_infer.py",
         "lightllm/common/basemodel/attention_backend_manager.py",
         "lightllm/common/basemodel/layer_infer/template/transformer_layer_infer_template.py",
+        "lightllm/common/basemodel/layer_infer/template/gqa_transformer_layer_infer_template.py",
     ):
         assert expected in found
 

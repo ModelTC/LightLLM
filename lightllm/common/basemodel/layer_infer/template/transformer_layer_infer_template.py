@@ -1,6 +1,5 @@
-from lightllm.common.attention.backends.gqa import GQALayerConfig, GQALayerInputs, gqa_kv_quant_fields
 from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig, attention_is_causal
+from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 import os
 import torch
 import torch.distributed as dist
@@ -31,66 +30,8 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         return
 
     def attention_config(self, model) -> LayerAttentionConfig:
-        """Describe this layer's attention once the model's cache has been allocated.
-
-        The default is GQA over the layer's full-attention KV cache, the same in prefill and decode.
-        """
-        config = self._gqa_config(model)
-        return LayerAttentionConfig(prefill=config, decode=config)
-
-    def _gqa_cache_state(self, manager, model_role) -> FullAttentionState:
-        return manager.get_state(
-            model_role=model_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-
-    def _gqa_kv_cache(self, state: FullAttentionState):
-        """This layer's (keys, values) cache views; KV-sharing layers read another layer's."""
-        return state.get_layer_view(logical_layer_id=self.layer_num_)
-
-    def _gqa_config(self, model, **fields) -> GQALayerConfig:
-        """The layer's GQA config; fields add the model's own attributes (sinks, ALiBi, windows)."""
-        state = self._gqa_cache_state(model.att_state_manager, model.att_state_role)
-        keys, _ = self._gqa_kv_cache(state)
-        scales = state.get_layer_kv_scales(self.layer_num_)
-        return GQALayerConfig(
-            num_heads=self.tp_q_head_num_,
-            num_kv_heads=keys.shape[1],
-            head_dim=self.head_dim_,
-            dtype=model.data_type,
-            causal=attention_is_causal(model),
-            **gqa_kv_quant_fields(model.args.llm_kv_type, scales, self.head_dim_),
-            **fields,
-        )
-
-    def _gqa_sinks(self, layer_weight):
-        return None
-
-    def _gqa_alibi_slopes(self, layer_weight):
-        return None
-
-    def _gqa_attention(self, backend, q, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
-        state = self._gqa_cache_state(infer_state.att_state_manager, infer_state.att_state_role)
-        keys, values = self._gqa_kv_cache(state)
-        config = backend.layer_config
-        query = q.view(-1, config.num_heads, config.head_dim)
-        inputs = GQALayerInputs(
-            q=query,
-            k_cache=keys,
-            v_cache=values,
-            kv_scales=state.get_layer_kv_scales(self.layer_num_),
-            sinks=self._gqa_sinks(layer_weight),
-            alibi_slopes=self._gqa_alibi_slopes(layer_weight),
-        )
-        output = backend.forward(
-            infer_state.att_states[backend.state_key],
-            inputs,
-            out=self.alloc_tensor(query.shape, dtype=query.dtype, device=query.device),
-            alloc_func=self.alloc_tensor,
-        )
-        return output.view(q.shape)
+        """Describe this layer's attention once the model's cache has been allocated."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement attention_config")
 
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
@@ -116,10 +57,10 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         return
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.prefill_backend, q, infer_state, layer_weight)
+        raise Exception("need to impl")
 
     def _token_attention_kernel(self, q, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:
-        return self._gqa_attention(self.decode_backend, q, infer_state, layer_weight)
+        raise Exception("need to impl")
 
     def _get_o(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")

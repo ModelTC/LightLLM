@@ -38,7 +38,7 @@ flowchart TD
 - 在调用 attention 之前把本层的 K/V 写入 KV cache。
 - 每次调用时解析 KV 量化 scale（`state.get_layer_kv_scales(layer)`）、线性注意力的 conv/SSM 状态视图、稀疏注意力的 top-k 索引和融合投影，构造族的 `LayerInputs`，用当前 backend 对应的 attention state 直接调用 `forward`。
 
-GQA 层的声明和调用由 `TransformerLayerInferTpl` 统一提供：默认的 `attention_config()` 在两个阶段使用同一 GQA 配置，默认的 `_context_attention_kernel` / `_token_attention_kernel` 调用绑定的 backend。模型只覆盖与自身相关的部分：`_gqa_config(model, **fields)` 追加层属性，`_gqa_sinks` / `_gqa_alibi_slopes` 提供逐层权重（GPT-OSS 的 sinks、Bloom 的 ALiBi 斜率），`_gqa_kv_cache` 按本层的 head 布局切出 KV 视图（Gemma4、DFlash2）。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
+GQA 层继承 `GQATransformerLayerInferTpl`（Llama、Bloom 及其派生模型），由它统一提供声明和调用：`attention_config()` 在两个阶段使用同一 GQA 配置，`_context_attention_kernel` / `_token_attention_kernel` 调用绑定的 backend。通用的 `TransformerLayerInferTpl` 不假定 attention 类型。模型只覆盖与自身相关的部分：`_gqa_config(model, **fields)` 追加层属性，`_gqa_sinks` / `_gqa_alibi_slopes` 提供逐层权重（GPT-OSS 的 sinks、Bloom 的 ALiBi 斜率），`_gqa_kv_cache` 按本层的 head 布局切出 KV 视图（Gemma4、DFlash2）。Gemma4 在滑窗层的 prefill 配置中开启图像区间内双向 attention，DFlash 只声明 decode 配置。执行时，层从 KV 视图和权重组装 `GQALayerInputs`，连同当前步的 attention state 传给后端的 `forward()`。
 
 模型层不直接调用 attention kernel。`unit_tests/common/attention/test_attention_call_sites.py` 检查 layer infer、infer state、model 和 `attention_backend_manager.py` 不导入 attention kernel 模块（视觉编码器除外，它在单张图像内计算 attention，不使用 KV cache），并检查 `lightllm/common/attention/**` 在运行时不导入模型侧代码：backend 只在 `TYPE_CHECKING` 下为注解引用 `InferStateInfo`，运行时需要的 `GraphMode` 定义在 `lightllm/common/attention/backend.py`，由 `infer_struct` 转导出。
 

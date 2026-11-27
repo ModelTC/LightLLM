@@ -1,12 +1,12 @@
 import torch
 from typing import Tuple
-from lightllm.common.basemodel import TransformerLayerInferTpl
+from lightllm.common.basemodel import GQATransformerLayerInferTpl
 from lightllm.common.basemodel.attention_backend_manager import LayerAttentionConfig
 from lightllm.models.bloom.layer_weights.transformer_layer_weight import BloomTransformerLayerWeight
 from lightllm.common.basemodel import InferStateInfo
 
 
-class BloomTransformerLayerInfer(TransformerLayerInferTpl):
+class BloomTransformerLayerInfer(GQATransformerLayerInferTpl):
     """ """
 
     def __init__(self, layer_num, network_config):
