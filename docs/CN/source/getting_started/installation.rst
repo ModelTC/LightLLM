@@ -35,7 +35,7 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $   --shm-size 2g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
 
-Docker 构建默认使用 Python 3.12。也可以从源码构建并运行镜像：
+你也可以使用源码手动构建镜像并运行,建议手动构建镜像,因为更新比较频繁：
 
 .. code-block:: console
 
@@ -69,7 +69,7 @@ Docker 构建默认使用 Python 3.12。也可以从源码构建并运行镜像�
 .. code-block:: console
 
     $ # (推荐) 创建一个新的 conda 环境
-    $ conda create -n lightllm python=3.12 -y
+    $ conda create -n lightllm python=3.10 -y
     $ conda activate lightllm
     $
     $ # 下载lightllm的最新源码

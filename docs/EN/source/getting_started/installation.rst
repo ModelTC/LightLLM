@@ -39,7 +39,7 @@ The easiest way to install Lightllm is using the official image. You can directl
     $   --shm-size 2g -v your_local_path:/data/         \
     $   ghcr.io/modeltc/lightllm:main /bin/bash
 
-The Docker build uses Python 3.12 by default. You can build and run the image from source:
+You can also manually build the image from source and run it:
 
 .. code-block:: console
 
@@ -71,7 +71,7 @@ You can also install Lightllm from source:
 .. code-block:: console
 
     $ # (Recommended) Create a new conda environment
-    $ conda create -n lightllm python=3.12 -y
+    $ conda create -n lightllm python=3.10 -y
     $ conda activate lightllm
     $
     $ # Download the latest Lightllm source code

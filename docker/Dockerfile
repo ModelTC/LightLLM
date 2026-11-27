@@ -1,7 +1,7 @@
 ARG CUDA_VERSION=13.0.0
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
-ARG PYTHON_VERSION=3.12
+ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG NIXL_REF=v1.2.0
 # The independently buildable vLLM fork retains Hopper/DSV4 and supports out buffers.
@@ -42,21 +42,20 @@ RUN case ${TARGETPLATFORM} in \
     rm ~/mambaforge.sh
 
 RUN case ${TARGETPLATFORM} in \
-    "linux/arm64") exit 1 ;; \
+    "linux/arm64")  exit 1 ;; \
+    *)              /opt/conda/bin/conda update -y conda && \
+                    /opt/conda/bin/conda install -y "python=${PYTHON_VERSION}" ;; \
     esac && \
-    if [ "$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" != "${PYTHON_VERSION}" ]; then \
-      conda install -y "python=${PYTHON_VERSION}"; \
-    fi && \
     /opt/conda/bin/conda clean -ya
 
 WORKDIR /lightllm
 
 COPY ./requirements.txt /lightllm/requirements.txt
-ARG PIP_DEFAULT_TIMEOUT=90
+RUN pip install -U pip
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
     -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
-RUN PIP_NO_INDEX=0 pip install --no-cache-dir --no-deps "flash-qla==${FLASHQLA_VERSION}" -i https://pypi.org/simple
+RUN PIP_NO_INDEX=0 pip install --no-cache-dir "flash-qla==${FLASHQLA_VERSION}" -i https://pypi.org/simple
 RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cuda/targets/x86_64-linux/include${CPATH:+:${CPATH}} && \
     git clone ${FLASH_MLA_REPO} /root/FlashMLA && \
     cd /root/FlashMLA && \
