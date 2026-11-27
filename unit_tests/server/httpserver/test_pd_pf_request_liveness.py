@@ -91,7 +91,9 @@ class _Session:
         message = self._record("p", payload)
         if message[0] == ObjType.PD_PF_PREFILL_REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
-            self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(GROUP_ID, [1, 2])
+            self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(
+                group_request_id=GROUP_ID, pd_master_node_id=self.manager.args.pd_node_id, prompt_ids=[1, 2]
+            )
             if not self.hold_prefill_ready:
                 self.status.pf_prefill_kv_ready_event.set()
             self.status.out_token_info_list.append(

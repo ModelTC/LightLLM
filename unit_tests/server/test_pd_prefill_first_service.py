@@ -265,7 +265,9 @@ class PrefillFirstPeers:
                 message=(ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, segment.prefill_error),
             )
             return
-        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=list(prompt_ids))
+        ready = PdPfPrefillKvReady(
+            group_request_id=group_request_id, pd_master_node_id=master_id, prompt_ids=list(prompt_ids)
+        )
         token = _token_message(
             mode="prefill",
             master_id=master_id,

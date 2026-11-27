@@ -269,7 +269,7 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
 
     assert backend.pd_prefill_kv_ready_push.sent == [
-        PdPfPrefillKvReady(group_request_id=9, prompt_ids=[3, 4], pd_master_node_id=100)
+        PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=[3, 4])
     ]
     assert hasattr(req, "pd_prefill_kv_ready_reported")
 

@@ -54,14 +54,13 @@ class ObjType(enum.Enum):
 class PdPfPrefillKvReady:
     """PD_PF_PREFILL_KV_READY 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。
 
-    只带对上请求和交给 decode 的 prompt。首 token 走 token 流，并在最后一块传输 done 上带给 decode。
-    页号留在 prefill 进程里。
+    本机 pd_report 根据 pd_master_node_id 选择目标 PD Master。Master 将 prompt 交给 decode。
+    首 token 走 token 流，并在最后一块传输 done 上带给 decode。页号留在 prefill 进程里。
     """
 
     group_request_id: int
+    pd_master_node_id: int
     prompt_ids: List[int]
-    # 本机 pd_report 用它选择 PD Master。经 /pd_report 送到目标之后，master 不再读这个字段。
-    pd_master_node_id: int = 0
 
 
 @dataclass

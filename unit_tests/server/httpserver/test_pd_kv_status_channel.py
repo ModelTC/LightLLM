@@ -107,7 +107,7 @@ def test_pd_report_connects_with_protocol_ping(monkeypatch):
 def test_pd_report_routes_prefill_kv_ready_by_master_id():
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._queues[100] = asyncio.Queue()
-    ready = PdPfPrefillKvReady(group_request_id=9, prompt_ids=[1, 2], pd_master_node_id=100)
+    ready = PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=[1, 2])
 
     _deliver(manager, [ready])
 

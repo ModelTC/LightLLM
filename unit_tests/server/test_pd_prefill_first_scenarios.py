@@ -15,6 +15,7 @@ import pytest
 import torch
 
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
+from lightllm.server.core.objs.pd_kv_trans_params import PDKVTransParamObj
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo
 from lightllm.server.router.manager import RouterManager
@@ -45,10 +46,12 @@ class _Req:
         self.req_idx = 0
         self.cur_kv_len = cur_kv_len
         self.shm_req = _ShmReq(input_len=input_len)
+        trans_params = PDKVTransParamObj()
+        trans_params.set(payload)
         self.sampling_param = SimpleNamespace(
             shm_param=SimpleNamespace(
                 pd_prefill_first=prefill_first,
-                pd_kv_trans_params=SimpleNamespace(get=lambda: payload, data_len=len(payload)),
+                pd_kv_trans_params=trans_params,
             ),
             pd_decode_node=_decode_info(ready_kv_len=0),
             pd_master_node_id=2,
@@ -84,6 +87,7 @@ def _prefill_backend(queue):
     backend.is_master_in_dp = True
     backend.info_queue = queue
     backend.node_world_size = 1
+    backend.dp_world_size = 1
     backend.dp_rank_in_node = 0
     return backend
 
@@ -277,15 +281,22 @@ def test_17_ready_command_on_an_aborted_request_drops_the_attribute_without_tran
     assert not hasattr(req, "pd_wait_decode_kv_info_ready")
 
 
-def test_18_ready_command_puts_the_first_token_on_the_last_task_including_att_state(monkeypatch):
+@pytest.mark.parametrize("endpoint_ready_before_prefill", [False, True], ids=["late_endpoint", "early_endpoint"])
+def test_18_first_token_is_on_the_last_task_including_att_state(monkeypatch, endpoint_ready_before_prefill):
     info = _decode_info(ready_kv_len=1)
     payload = pickle.dumps(info)
-    req = _req(req_id=9, input_len=6, cur_kv_len=6, payload=payload)
-    backend = _prefill_backend(queue=SimpleNamespace(put=lambda task: queued.append(task)))
+    req = _req(req_id=9, input_len=6, cur_kv_len=6, payload=payload if endpoint_ready_before_prefill else b"")
     queued = []
+    backend = _prefill_backend(queue=SimpleNamespace(put=queued.append))
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
-    backend._pf_prefill_chuncked_handle_func(req_obj=req, next_token_id=21, next_token_prob=-0.4, output_len=1)
     _install_mapping(monkeypatch, req)
+    backend._pf_prefill_chuncked_handle_func(req_obj=req, next_token_id=21, next_token_prob=-0.4, output_len=1)
+    if endpoint_ready_before_prefill:
+        assert len(queued) == 3
+    else:
+        assert queued == []
+        assert hasattr(req, "pd_wait_decode_kv_info_ready")
+        req.sampling_param.shm_param.pd_kv_trans_params.set(payload)
     backend._on_pf_decode_kv_ready(req_id=9)
     assert [(task.start_kv_index, task.end_kv_index, task.page_kind) for task in queued] == [
         (1, 5, "kv"),
