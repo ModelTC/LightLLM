@@ -1,30 +1,67 @@
-import os
 import threading
 import torch
 import torch.nn.functional as F
+import triton
+import triton.language as tl
 from typing import Optional, List, Union, Tuple
 from .quantize_method import QuantizationMethod, WeightPack
 from .registry import QUANTMETHODS
-from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import fp8_scaled_mm_per_token
+from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import (
+    fp8_scaled_mm_per_token,
+    int8_scaled_mm_per_token,
+)
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
     lightllm_per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
-from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
 
 
-if HAS_VLLM:
-    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
+@triton.jit
+def _int8_quant_kernel(inputs, output, scales, width: tl.constexpr, stride, block: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, block)
+    values = tl.load(inputs + row * stride + cols, cols < width, 0).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(values), 0) / 127.0, 1.1754943508222875e-38)
+    quant = tl.extra.cuda.libdevice.rint(tl.div_rn(values, scale))
+    tl.store(output + row * width + cols, quant.to(tl.int8), cols < width)
+    tl.store(scales + row, scale)
 
-LIGHTLLM_USE_TRITON_FP8_SCALED_MM = os.getenv("LIGHTLLM_USE_TRITON_FP8_SCALED_MM", "False").upper() in [
-    "ON",
-    "TRUE",
-    "1",
-]
+
+def quantize_int8_per_row(inputs):
+    rows, width = inputs.shape
+    quantized = torch.empty((rows, width), device=inputs.device, dtype=torch.int8)
+    scales = torch.empty((rows, 1), device=inputs.device, dtype=torch.float32)
+    inputs = inputs if inputs.stride(1) == 1 else inputs.contiguous()
+    _int8_quant_kernel[(rows,)](inputs, quantized, scales, width, inputs.stride(0), triton.next_power_of_2(width))
+    return quantized, scales
+
+
+def _sgl_scaled_mm(op, activation, weight, activation_scale, weight_scale, dtype, out, bias):
+    if (
+        op is None
+        or dtype not in (torch.float16, torch.bfloat16)
+        or activation.shape[1] % 32
+        or weight.shape[1] % 16
+        or activation.stride(0) % 16
+        or weight.stride(1) % 16
+        or weight_scale.numel() != weight.shape[1]
+        or not weight_scale.is_contiguous()
+        or (bias is not None and (bias.dtype != dtype or not bias.is_contiguous()))
+    ):
+        return None
+    result = op(activation, weight, activation_scale, weight_scale, dtype, bias)
+    return out.copy_(result) if out is not None else result
+
+
+def quantize_fp8_per_row(input_tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    quantized = torch.empty(input_tensor.shape, device=input_tensor.device, dtype=torch.float8_e4m3fn)
+    scale = torch.empty((input_tensor.shape[0], 1), device=input_tensor.device, dtype=torch.float32)
+    lightllm_per_token_group_quant_fp8(input_tensor.contiguous(), input_tensor.shape[-1], quantized, scale)
+    return quantized, scale
 
 
 class BaseQuantizationMethod(QuantizationMethod):
@@ -83,19 +120,24 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        input_scale = None
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        input_scale = None  # dynamic quantization for input tensor
-        x_q, x_scale, x_zp = vllm_ops.scaled_int8_quant(input_tensor, scale=input_scale, azp=None, symmetric=True)
+        x_q, x_scale = quantize_int8_per_row(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
+        result = _sgl_scaled_mm(
+            getattr(sgl_ops, "int8_scaled_mm", None), x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out, bias
+        )
+        if result is not None:
+            return result
         if out is None:
             if use_custom_tensor_mananger:
                 out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
+        int8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
+        if bias is not None:
+            out.add_(bias)
         return out
 
     @property
@@ -128,9 +170,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        qweight, weight_scale = scaled_fp8_quant(
-            weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
-        )
+        qweight, weight_scale = quantize_fp8_per_row(weight.cuda(self.device_id_))
         output.weight.copy_(qweight)
         output.weight_scale.copy_(weight_scale.view(-1))
         return
@@ -146,19 +186,22 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> torch.Tensor:
         qweight = weight_pack.weight.t()
         weight_scale = weight_pack.weight_scale
-        x_q, x_scale = scaled_fp8_quant(input_tensor, scale=None, scale_ub=None, use_per_token_if_dynamic=True)
+        x_q, x_scale = quantize_fp8_per_row(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
+        result = _sgl_scaled_mm(
+            getattr(sgl_ops, "fp8_scaled_mm", None), x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out, bias
+        )
+        if result is not None:
+            return result
         if out is None:
             if use_custom_tensor_mananger:
                 out = self.cache_manager.alloc_tensor((m, n), input_tensor.dtype, device=input_tensor.device)
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        if LIGHTLLM_USE_TRITON_FP8_SCALED_MM:
-            out = fp8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
-            assert bias is None, "Bias addition is not supported in fp8w8a8 quantization method for now"
-        else:
-            cutlass_scaled_mm(out, x_q, qweight, x_scale, weight_scale, bias)
+        fp8_scaled_mm_per_token(x_q, qweight, x_scale, weight_scale, input_tensor.dtype, out)
+        if bias is not None:
+            out.add_(bias)
         return out
 
     @property
@@ -320,35 +363,6 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
 
 
-@QUANTMETHODS.register("fp8w8a8-pt-vllm", platform="cuda")
-class FP8w8a8PerTensorVllmQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
-    def __init__(self):
-        super().__init__()
-        if not HAS_VLLM:
-            raise RuntimeError("fp8w8a8-pt-vllm requires vllm with cutlass_scaled_mm support")
-
-    def apply(
-        self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        qweight, weight_scale, x_q, x_scale, _, _ = self._dynamic_quant_input(
-            input_tensor, weight_pack, use_custom_tensor_mananger, bias
-        )
-        result = vllm_ops.cutlass_scaled_mm(
-            x_q, qweight, x_scale, weight_scale.reshape(1, 1).to(torch.float32), input_tensor.dtype
-        )
-        return out.copy_(result) if out is not None else result
-
-    @property
-    def method_name(self):
-        return "fp8w8a8-pt-vllm"
-
-
 @QUANTMETHODS.register("fp8w8a8-pt-sgl", platform="cuda")
 class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def __init__(self):
@@ -415,6 +429,25 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
         return "fp8w8a8-pt-triton"
 
 
+@QUANTMETHODS.register("fp8w8a8-pt-vllm", platform="cuda")
+class FP8w8a8PerTensorAutoQuantizationMethod(FP8w8a8PerTensorTritonQuantizationMethod):
+    def apply(self, input_tensor, weight_pack, out=None, workspace=None, use_custom_tensor_mananger=True, bias=None):
+        if not _HAS_SGL_FP8 or input_tensor.shape[-1] % 32 or weight_pack.weight.shape[-2] % 16:
+            return super().apply(input_tensor, weight_pack, out, workspace, use_custom_tensor_mananger, bias)
+        weight, weight_scale, quantized, scales, _, channels = self._dynamic_quant_input(
+            input_tensor, weight_pack, use_custom_tensor_mananger, bias
+        )
+        if weight_scale.numel() == 1:
+            weight_scale = weight_scale.expand(channels).contiguous()
+        result = sgl_ops.fp8_scaled_mm(quantized, weight, scales, weight_scale, input_tensor.dtype)
+        return out.copy_(result) if out is not None else result
+
+    def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
+        if _HAS_SGL_FP8:
+            return torch.empty((out_dim,), dtype=torch.float32, device=f"cuda:{device_id}")
+        return super()._create_weight_scale(out_dim, device_id)
+
+
 class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -474,34 +507,6 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("fp8w8a8-b128-vllm", platform="cuda")
-class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
-    def apply(
-        self,
-        input_tensor: torch.Tensor,
-        weight_pack: WeightPack,
-        out: Optional[torch.Tensor] = None,
-        workspace: Optional[torch.Tensor] = None,
-        use_custom_tensor_mananger: bool = True,
-        bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        qinput_tensor, qweight, input_scale, weight_scale, out = self._dynamic_quant_input(
-            input_tensor, weight_pack, out, use_custom_tensor_mananger
-        )
-        if qweight.shape[1] % self.block_size != 0:
-            raise ValueError(
-                "fp8w8a8-b128-vllm requires the output dimension to be divisible by 128; "
-                "use fp8w8a8-b128-triton instead"
-            )
-        input_scale = input_scale.t().contiguous().t()
-        cutlass_scaled_mm(out, qinput_tensor, qweight, input_scale, weight_scale, bias)
-        return out
-
-    @property
-    def method_name(self):
-        return "fp8w8a8-b128-vllm"
-
-
 @QUANTMETHODS.register(["fp8w8a8-b128-triton", "fp8w8a8-b128"], platform="cuda")
 class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
@@ -525,9 +530,43 @@ class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
             (self.block_size, self.block_size),
             dtype=input_tensor.dtype,
         )
-        assert bias is None, f"Bias addition is not supported in {self.method_name} for now"
+        if bias is not None:
+            out.add_(bias)
         return out
 
     @property
     def method_name(self):
         return "fp8w8a8-b128-triton"
+
+
+@QUANTMETHODS.register("fp8w8a8-b128-vllm", platform="cuda")
+class FP8w8a8B128AutoQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
+    def apply(self, input_tensor, weight_pack, out=None, workspace=None, use_custom_tensor_mananger=True, bias=None):
+        from .deepgemm import HAS_DEEPGEMM, _deepgemm_fp8_nt
+
+        weight = weight_pack.weight
+        if (
+            not HAS_DEEPGEMM
+            or input_tensor.dtype != torch.bfloat16
+            or not input_tensor.is_cuda
+            or torch.cuda.get_device_capability(input_tensor.device)[0] != 9
+            or input_tensor.shape[0] == 0
+            or weight.shape[0] % 128
+            or weight.shape[1] % 128
+        ):
+            return super().apply(input_tensor, weight_pack, out, workspace, use_custom_tensor_mananger, bias)
+        alloc = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
+        quantized, scales = per_token_group_quant_fp8(
+            input_tensor,
+            self.block_size,
+            dtype=weight.dtype,
+            column_major_scales=True,
+            scale_tma_aligned=True,
+            alloc_func=alloc,
+        )
+        if out is None:
+            out = alloc((input_tensor.shape[0], weight.shape[0]), device=input_tensor.device, dtype=input_tensor.dtype)
+        _deepgemm_fp8_nt((quantized, scales), (weight, weight_pack.weight_scale), out)
+        if bias is not None:
+            out.add_(bias)
+        return out

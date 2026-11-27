@@ -6,9 +6,11 @@ black==23.12.0
 boltons==23.0.0
 boto3==1.28.7
 botocore==1.31.7
-Brotli==1.0.9
+Brotli==1.0.9; python_version < "3.12"
+Brotli==1.1.0; python_version >= "3.12"
 certifi==2023.5.7
-cffi==1.15.1
+cffi==1.15.1; python_version < "3.12"
+cffi==1.17.1; python_version >= "3.12"
 charset-normalizer==3.2.0
 click==8.1.6
 cmake==3.27.0
@@ -21,7 +23,8 @@ exceptiongroup==1.1.2
 fastapi==0.115.6
 filelock==3.17.0
 fsspec==2023.6.0
-gmpy2==2.1.2
+gmpy2==2.1.2; python_version < "3.12"
+gmpy2==2.2.1; python_version >= "3.12"
 h11==0.14.0
 humanfriendly==10.0
 humanize==4.7.0
@@ -38,7 +41,7 @@ networkx==3.1
 ninja==1.11.1
 numpy==2.1.3
 packaging==24.2
-pip==23.0.1
+pip==23.0.1; python_version < "3.12"
 pluggy==1.2.0
 plumbum==1.8.2
 # CUTLASS DSL 4.6 requires protobuf >= 6.30.2, < 7.
@@ -55,7 +58,8 @@ regex==2026.5.9
 requests==2.31.0
 rpyc==5.3.1
 ruamel.yaml==0.17.32
-ruamel.yaml.clib==0.2.7
+ruamel.yaml.clib==0.2.7; python_version < "3.12"
+ruamel.yaml.clib==0.2.8; python_version >= "3.12"
 s3transfer==0.6.1
 sentencepiece==0.2.0
 setuptools==77.0.3
@@ -69,7 +73,8 @@ transformers==5.8.0
 tokenizers==0.22.1
 urllib3==1.26.16
 uvicorn==0.19.0
-uvloop==0.17.0
+uvloop==0.17.0; python_version < "3.12"
+uvloop==0.21.0; python_version >= "3.12"
 wheel==0.40.0
 zstandard==0.23.0
 safetensors==0.4.5
@@ -78,7 +83,8 @@ tiktoken==0.8.0
 matplotlib==3.10.0
 psutil==5.9.4
 prometheus_client==0.20.0
-cchardet==2.1.7
+cchardet==2.1.7; python_version < "3.12"
+cchardet==2.2.0; python_version >= "3.12"
 ujson==5.10.0
 frozendict==2.4.6
 atomics==1.0.3
@@ -104,6 +110,7 @@ xxhash==3.6.0
 torchvision==0.26.0
 # XGrammar needs >=0.1.11; TileLang 0.1.9 fails to import with TVM-FFI 0.1.14.post1.
 apache-tvm-ffi==0.1.11
+tilelang==0.1.9
 xgrammar==0.2.8
 partial_json_parser==0.2.1.1.post6
 websockets==15.0.1

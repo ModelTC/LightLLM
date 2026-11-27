@@ -99,7 +99,7 @@ def _scaled_mm_per_token(
         else:
             a = tl.load(a_ptrs)
             b = tl.load(b_ptrs)
-        acc = tl.dot(a, b, acc)
+        acc = tl.dot(a, b, acc, out_dtype=ACC_DTYPE)
         if not USE_TMA:
             a_ptrs += BLOCK_K * stride_ak
             b_ptrs += BLOCK_K * stride_bk

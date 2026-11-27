@@ -1,6 +1,7 @@
 # Adapted from
 # https://github.com/sgl-project/sglang/blob/v0.4.6.post5/benchmark/kernels/fused_moe_triton/benchmark_vllm_vs_sglang_fused_moe_triton.py
 import argparse
+from importlib.util import find_spec
 
 import torch
 import triton
@@ -84,7 +85,6 @@ def fused_moe_lightllm_api(
     a2_scale=None,
     block_shape=None,
 ):
-
     topk_weights, topk_ids = select_experts(
         hidden_states=x,
         router_logits=input_gating,
@@ -196,21 +196,18 @@ def fused_moe_sglang_api(
     )
 
 
+PROVIDERS = ["sglang_fused_moe_triton", "lightllm_fused_moe_triton"]
+if find_spec("vllm") is not None:
+    PROVIDERS.insert(0, "vllm_fused_moe_triton")
+
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
         x_vals=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         line_arg="provider",
-        line_vals=[
-            "vllm_fused_moe_triton",
-            "sglang_fused_moe_triton",
-            "lightllm_fused_moe_triton",
-        ],
-        line_names=[
-            "vllm_fused_moe_triton",
-            "sglang_fused_moe_triton",
-            "lightllm_fused_moe_triton",
-        ],
+        line_vals=PROVIDERS,
+        line_names=PROVIDERS,
         styles=[
             ("blue", "-"),
             ("green", "-"),

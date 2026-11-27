@@ -727,10 +727,10 @@ Quantization Parameters
          - Implementation backend
        * - ``w8a8``
          - INT8 W8A8; W: per-channel, A: per-token
-         - vLLM
+         - SGL or Triton
        * - ``fp8w8a8``
          - FP8 W8A8; W: per-channel, A: per-token
-         - vLLM
+         - SGL or Triton
        * - ``fp8w8a8-pt``
          - FP8 W8A8; W: per-tensor, A: per-token
          - Triton
@@ -745,22 +745,22 @@ Quantization Parameters
          - Triton
        * - ``awq``
          - INT4 weight-only; group size comes from the checkpoint
-         - vLLM
+         - Triton or SGL dequantization with PyTorch matmul
        * - ``awq_marlin``
-         - INT4 weight-only; group size comes from the checkpoint
-         - vLLM
+         - Legacy alias for ``awq``
+         - Same as ``awq``
        * - ``none``
          - No quantization
          - -
        * - ``w8a8-vllm``
-         - INT8 W8A8; W: per-channel, A: per-token
-         - vLLM
+         - Legacy alias for ``w8a8``
+         - SGL or Triton
        * - ``fp8w8a8-vllm``
-         - FP8 W8A8; W: per-channel, A: per-token
-         - vLLM
+         - Legacy alias for ``fp8w8a8``
+         - SGL or Triton
        * - ``fp8w8a8-pt-vllm``
          - FP8 W8A8; W: per-tensor, A: per-token
-         - vLLM
+         - SGL or Triton
        * - ``fp8w8a8-pt-sgl``
          - FP8 W8A8; W: per-tensor, A: per-token
          - SGL
@@ -769,7 +769,7 @@ Quantization Parameters
          - Triton
        * - ``fp8w8a8-b128-vllm``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
-         - vLLM
+         - DeepGEMM on supported Hopper shapes, Triton otherwise
        * - ``fp8w8a8-b128-deepgemm``
          - FP8 W8A8; W: per-block 128×128, A: per-token-group 128
          - DeepGEMM
