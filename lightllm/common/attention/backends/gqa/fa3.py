@@ -60,9 +60,8 @@ class FA3GQADecodeAttState:
     page_size: int
 
 
-def fa3_requires_cpu_cache_sync() -> bool:
-    # 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
-    return enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
+# 设为 1 / TRUE / ON 时，FA3 与 CPU cache 搬运在 GPU 上互相等待。
+FA3_CPU_CACHE_SYNC = enable_env_vars("LIGHTLLM_FA3_CPU_CACHE_SYNC")
 
 
 def build_fa3_decode_state(backend: AttentionBackend, infer_state: InferStateInfo) -> FA3GQADecodeAttState:
@@ -239,10 +238,6 @@ class FA3GQAPrefillBackend(AttentionBackend[GQALayerConfig, FA3GQAPrefillAttStat
     @classmethod
     def group_key(cls, layer_config: GQALayerConfig):
         return layer_config.kv_quant
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        return fa3_requires_cpu_cache_sync()
 
     def setup(self, resources: AttentionBuildResources) -> None:
         self.resources = resources

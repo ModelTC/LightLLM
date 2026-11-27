@@ -341,13 +341,8 @@ class TpPartBaseModel:
             config = layer.attention_config(self)
             layer.prefill_backend, layer.decode_backend = backend_manager.bind(config)
         for phase in backend_manager.state_groups:
-            backend_names = [backend.name for backend in backend_manager.backends(phase)]
+            backend_names = [backend.name for backend in backend_manager.state_groups[phase].values()]
             logger.info(f"{role} {phase} attention backends: {backend_names}")
-
-    @property
-    def requires_cpu_cache_sync(self) -> bool:
-        """Whether some attention kernel of this model must not overlap CPU cache copies on the GPU."""
-        return self.attention_backend_manager.requires_cpu_cache_sync()
 
     def _align_decode_batch_size(self, batch_size: int) -> int:
         alignment = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)

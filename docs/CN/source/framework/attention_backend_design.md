@@ -50,7 +50,7 @@ GQA 层的声明和调用由 `TransformerLayerInferTpl` 统一提供：默认的
 
 - `bind(spec)` 为每个阶段独立选择实现，然后将两个 backend 赋给层。阶段、layer config 和请求的 backend 都相同的层复用 backend。某阶段的 layer config 为 `None` 时，该阶段返回 `None`，例如 DFlash 草稿层只在 decode 计算。每个阶段的每个 `state_key` 由第一个绑定的 backend 负责准备状态。
 - `prepare(infer_state)` 在每个 microbatch 对本阶段各组的代表实例调用一次 `backend.prepare`，返回 `{state_key: att_state}`。没有状态组的阶段返回空字典。
-- `model.requires_cpu_cache_sync`：是否有实现不能与 CPU cache 搬运在 GPU 上并行。
+- `requires_cpu_cache_sync`：是否有已绑定的实现不能与 CPU cache 搬运在 GPU 上并行。
 
 运行时创建时从模型读取一次全部静态信息，之后不再持有模型：
 
@@ -85,7 +85,7 @@ MLA 的 prefill 与 decode 使用不同的 layer config 类型，其余族通常
 - `prepare(infer_state, resources)` 首次调用时执行 `setup(resources)`，在实例上创建该组跨步复用的存储，随后调用 `build(infer_state)`。`setup` 和 `build` 只能读取 `group_key` 包含的 layer config 字段，模型级资源由 `resources` 提供。
 - `build(infer_state)` 为当前 microbatch 生成一份 `AttState`。所有持有同一 `state_key` 的层直接使用它；`forward` 所需而 `setup` 才知道的值（如 page size）放在 `AttState` 中，因为只有组的代表实例执行过 `setup`。
 - `forward(att_state, layer_inputs, ...)` 使用实例持有的 `layer_config`，结合当前层的张量计算输出。
-- `requires_cpu_cache_sync()` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
+- 类属性 `requires_cpu_cache_sync` 声明 CPU cache 搬运是否需要与该 backend 的计算同步。
 
 例如，两层 MLA decode 只有 `softmax_scale` 不同。Triton 可以为它们准备同一份切分计划，FlashInfer 在 `plan` 时就读取 scale，因此要准备两份。两种后端都从静态 layer config 获取 scale。
 

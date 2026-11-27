@@ -16,7 +16,6 @@ from lightllm.common.basemodel.attention_backend_manager import (
 )
 from lightllm.common.attention.backends.gqa import gqa_kv_quant_fields
 from lightllm.common.basemodel.infer_struct import GraphMode, InferStateInfo
-from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from unit_tests.common.attention.backends.groups_runner import set_up
 
 
@@ -39,12 +38,8 @@ def start_args(**overrides):
     return SimpleNamespace(**{**args, **overrides})
 
 
-class FakeModel(SimpleNamespace):
-    requires_cpu_cache_sync = TpPartBaseModel.requires_cpu_cache_sync
-
-
 def fake_model(**args):
-    return FakeModel(
+    return SimpleNamespace(
         args=start_args(**args),
         max_seq_length=1024,
         graph_max_batch_size=4,
@@ -67,7 +62,7 @@ def setup_model(model):
 
 
 def backends(model, phase):
-    return tuple(model.attention_backend_manager.backends(phase))
+    return tuple(type(backend) for backend in model.attention_backend_manager.state_groups[phase].values())
 
 
 def gqa(**fields) -> GQALayerConfig:
@@ -250,9 +245,7 @@ def fake_backend(backend_name, *, sync=False):
         def group_key(cls, layer_config):
             return layer_config.key
 
-        @classmethod
-        def requires_cpu_cache_sync(cls):
-            return sync
+        requires_cpu_cache_sync = sync
 
     return Backend
 
@@ -312,7 +305,7 @@ def test_step_builders_are_created_per_group_and_phase_on_first_build(fake_famil
     assert decode.att_states[first_decode.state_key] is first_args
     assert first_args.batch.batch_size == 2
     assert sorted(created) == [("fake_decode", 1), ("fake_prefill", 1), ("fake_prefill", 2)]
-    assert groups.requires_cpu_cache_sync
+    assert groups.attention_backend_manager.requires_cpu_cache_sync
 
 
 def test_decode_only_layers_build_no_prefill_att_state(fake_family):

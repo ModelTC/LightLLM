@@ -102,17 +102,15 @@ class AttentionBackendManager:
         configure_attention_step(infer_state, **self.step_config)
         return {key: backend.prepare(infer_state, self.resources) for key, backend in groups.items()}
 
-    def backends(self, phase: str) -> list[type[AttentionBackend]]:
-        """Return the backend class of each state group in binding order."""
-        return [type(backend) for backend in self.state_groups[phase].values()]
-
     @property
     def has_attention(self) -> bool:
         return any(self.state_groups.values())
 
+    @property
     def requires_cpu_cache_sync(self) -> bool:
+        """Whether some bound backend must not overlap CPU cache copies on the GPU."""
         return any(
-            backend.requires_cpu_cache_sync() for groups in self.state_groups.values() for backend in groups.values()
+            backend.requires_cpu_cache_sync for groups in self.state_groups.values() for backend in groups.values()
         )
 
     def _select(self, phase: str, layer_config: Any, backend_name: Optional[str]) -> Optional[AttentionBackend]:

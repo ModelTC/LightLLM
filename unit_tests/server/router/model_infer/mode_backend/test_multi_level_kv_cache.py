@@ -594,9 +594,9 @@ def test_fa3_cpu_cache_sync_defaults_off():
     from lightllm.common.attention.backends.gqa.fa3 import FA3GQADecodeBackend, FA3GQAPrefillBackend
     from lightllm.common.attention.backends.mla.fa3 import FA3MLADecodeBackend, FA3MLAPrefillBackend
 
-    assert AttentionBackend.requires_cpu_cache_sync() is False
+    assert AttentionBackend.requires_cpu_cache_sync is False
     assert not any(
-        backend.requires_cpu_cache_sync()
+        backend.requires_cpu_cache_sync
         for backend in (FA3GQAPrefillBackend, FA3GQADecodeBackend, FA3MLAPrefillBackend, FA3MLADecodeBackend)
     )
 
@@ -604,5 +604,6 @@ def test_fa3_cpu_cache_sync_defaults_off():
 @pytest.mark.parametrize("requires_sync", [None, False, True])
 def test_cpu_cache_io_waits_on_compute_when_an_attention_group_requires_it(requires_sync):
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
-    module.backend = SimpleNamespace(model=SimpleNamespace(requires_cpu_cache_sync=bool(requires_sync)))
+    manager = SimpleNamespace(requires_cpu_cache_sync=bool(requires_sync))
+    module.backend = SimpleNamespace(model=SimpleNamespace(attention_backend_manager=manager))
     assert MultiLevelKvCacheModule.need_sync_compute_stream.__wrapped__(module) is bool(requires_sync)

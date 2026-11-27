@@ -13,6 +13,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import torch.distributed as dist
 
+from lightllm.utils.backend_validator import validate as validate_library
 from lightllm.utils.log_utils import init_logger
 from .backend import AttentionBackend
 from .backends.gqa import GQALayerConfig
@@ -255,12 +256,6 @@ def _construct(
     return None, reasons
 
 
-def _validate_library(name: str) -> bool:
-    from lightllm.utils.backend_validator import validate
-
-    return validate(name)
-
-
 def select(
     layer_config: Any,
     phase: str,
@@ -268,7 +263,7 @@ def select(
     *,
     priority: Optional[Sequence[str]] = None,
     excluded: Sequence[str] = (),
-    validate: Callable[[str], bool] = _validate_library,
+    validate: Callable[[str], bool] = validate_library,
 ) -> AttentionBackend:
     """Construct the backend for layers with layer_config in phase ("prefill" or "decode").
 

@@ -90,6 +90,8 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     name: ClassVar[str]
     # The phase the backend runs in, "prefill" or "decode"; the selector binds it only to that phase.
     phase: ClassVar[str]
+    # Whether its kernels must not overlap CPU cache copies on the GPU.
+    requires_cpu_cache_sync: ClassVar[bool] = False
 
     def __init__(self, layer_config: LayerConfig) -> None:
         self._check_supported(layer_config)
@@ -110,11 +112,6 @@ class AttentionBackend(ABC, Generic[LayerConfig, AttState, LayerInputs]):
     @cached_property
     def state_key(self) -> tuple:
         return type(self), self.group_key(self.layer_config)
-
-    @classmethod
-    def requires_cpu_cache_sync(cls) -> bool:
-        """Whether its kernels must not overlap CPU cache copies on the GPU."""
-        return False
 
     def prepare(self, infer_state: "InferStateInfo", resources: AttentionBuildResources) -> AttState:
         """Prepare this phase's shared state for one microbatch, setting up storage on first use."""

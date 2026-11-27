@@ -312,8 +312,8 @@ def test_main_and_native_mtp_sparse_attention_selection(monkeypatch, draft, kv_t
     assert layer.decode_backend.layer_config.causal is False
     # The backends can be set up from the layer config and the model's resources.
     for phase, backend, name in zip(("prefill", "decode"), (layer.prefill_backend, layer.decode_backend), expected):
-        (backend_cls,) = attention.backends(phase)
-        assert backend_cls.name == name
+        (group,) = attention.state_groups[phase].values()
+        assert group.name == name
         backend.setup(attention.resources)
 
 
