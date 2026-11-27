@@ -28,13 +28,14 @@ def _radix_row(
     count: tl.constexpr,
     block: tl.constexpr,
     out_block: tl.constexpr,
+    out_col_stride: tl.constexpr = 1,
 ):
     row = tl.program_id(0)
     length = tl.minimum(tl.load(lengths + row), width)
-    if length <= count:
+    if width <= count or length <= count:
         destinations = tl.arange(0, out_block)
         tl.store(
-            out + row * out_stride + destinations,
+            out + row * out_stride + destinations * out_col_stride,
             tl.where(destinations < length, destinations, -1),
             destinations < count,
         )
@@ -61,7 +62,7 @@ def _radix_row(
         ties = tl.cumsum(equal.to(tl.int32), 0)
         selected = greater | (equal & (ties <= remaining))
         ranks = tl.cumsum(selected.to(tl.int32), 0) - 1
-        tl.store(out + row * out_stride + ranks, offsets, selected & (ranks < count))
+        tl.store(out + row * out_stride + ranks * out_col_stride, offsets, selected & (ranks < count))
 
 
 @triton.jit
@@ -242,8 +243,9 @@ def _single_block_radix_topk(scores, lengths, out):
         out.stride(0),
         width,
         count,
-        triton.next_power_of_2(width),
+        triton.next_power_of_2(max(1, width)),
         triton.next_power_of_2(count),
+        out_col_stride=out.stride(1),
         num_warps=8,
     )
 
@@ -252,6 +254,9 @@ def ragged_topk(scores, lengths, out):
     rows, width = scores.shape
     count = out.shape[1]
     if rows == 0 or count == 0:
+        return
+    if width <= count and scores.is_cuda:
+        _single_block_radix_topk(scores, lengths, out)
         return
     if (
         width >= 65536

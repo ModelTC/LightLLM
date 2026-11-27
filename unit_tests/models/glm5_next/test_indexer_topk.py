@@ -105,6 +105,19 @@ def test_topk_with_empty_row(indexer):
     _assert_topk(logits, lengths, indices)
 
 
+@pytest.mark.parametrize("width", [0, 127, 512])
+def test_topk_when_row_width_fits(indexer, width):
+    logits = torch.empty((4, width), device="cuda")
+    lengths = torch.tensor([0, 1, width, width + 1], device="cuda", dtype=torch.int32)
+    output = torch.full((4, 1024), -2, device="cuda", dtype=torch.int32)
+    indices = output[:, ::2]
+    indexer.select_topk_indices(logits, lengths, indices)
+    positions = torch.arange(512, device="cuda", dtype=torch.int32)[None, :]
+    expected = torch.where(positions < lengths[:, None].clamp_max(width), positions, -1)
+    torch.testing.assert_close(indices, expected)
+    assert (output[:, 1::2] == -2).all()
+
+
 @pytest.mark.parametrize("width", [4096, 8192])
 def test_topk_2048_with_concentrated_candidates(indexer, width):
     logits = torch.linspace(1.0, 1.01, width, device="cuda").repeat(2, 1)
