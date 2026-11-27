@@ -71,9 +71,9 @@ class Glm5NextNsaInfer:
         # The small indexer is replicated: no all-gather of query heads and
         # identical pool selection on every TP rank.
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.index_n_heads, self.index_head_dim)
-        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=self.index_head_dim**-0.5)
+        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=self.index_head_dim ** -0.5)
         weights = layer_weight.weights_proj_.mm(hidden_states.float())
-        weights = weights * (self.index_n_heads**-0.5 * self.index_head_dim**-0.5) * q_scale.squeeze(-1)
+        weights = weights * (self.index_n_heads ** -0.5 * self.index_head_dim ** -0.5) * q_scale.squeeze(-1)
         max_pools = triton.cdiv(infer_state.max_kv_seq_len, 4 * 128) * 128
         # Prefill usually has many queries: parallelize over Q and reuse K within each query tile.
         # Decode has few queries, so paged MQA also splits K across SMs for parallelism.
@@ -93,7 +93,7 @@ class Glm5NextNsaInfer:
         # Account for DeepGEMM padding within the 512 MiB workspace.
         query_tile = 128 // self.index_n_heads
         logits_row_bytes = triton.cdiv(max_pools, 256) * 256 * 4
-        query_tiles = max(1, 512 * 1024**2 // (query_tile * logits_row_bytes))
+        query_tiles = max(1, 512 * 1024 ** 2 // (query_tile * logits_row_bytes))
         return query_tiles * query_tile
 
     def _get_prefill_indices(self, q_fp8, weights, indexer_k, infer_state, att_state, max_pools):
