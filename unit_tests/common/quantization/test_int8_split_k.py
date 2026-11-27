@@ -51,12 +51,14 @@ def test_int8_triton_out(monkeypatch, rows, width, depth, dtype, with_bias):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("per_tensor", [False, True])
-def test_fp8_triton_out(monkeypatch, dtype, per_tensor):
-    if not torch.cuda.is_available() or not is_hopper() or not triton_support_tensor_descriptor():
-        pytest.skip("requires Hopper TMA")
+@pytest.mark.parametrize("rows,per_tensor", [(1, True), (16, True), (512, False), (512, True)])
+def test_fp8_triton_out(monkeypatch, dtype, rows, per_tensor):
+    if not torch.cuda.is_available() or not is_hopper():
+        pytest.skip("requires Hopper")
+    if rows == 512 and not triton_support_tensor_descriptor():
+        pytest.skip("requires TMA")
     torch.manual_seed(1767)
-    inputs = torch.randn((512, 4096), device="cuda", dtype=dtype)
+    inputs = torch.randn((rows, 4096), device="cuda", dtype=dtype)
     weight = torch.randn((4096, 4096), device="cuda").to(torch.float8_e4m3fn)
     scales = torch.rand((1 if per_tensor else 4096,), device="cuda", dtype=torch.float32) / 127
     bias = None if per_tensor else torch.randn((4096,), device="cuda", dtype=dtype) / 16
@@ -66,6 +68,8 @@ def test_fp8_triton_out(monkeypatch, dtype, per_tensor):
     method_class = w8a8.FP8w8a8PerTensorAutoQuantizationMethod if per_tensor else w8a8.FP8w8a8QuantizationMethod
     method = method_class()
     monkeypatch.setattr(w8a8, "_sgl_scaled_mm", lambda *args: pytest.fail("expected Triton"))
+    if per_tensor:
+        monkeypatch.setattr(w8a8.sgl_ops, "fp8_scaled_mm", lambda *args: pytest.fail("expected Triton"))
 
     assert method.apply(inputs, pack, out=output, bias=bias) is output
     graph = torch.cuda.CUDAGraph()

@@ -9,7 +9,7 @@ from .registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.scaled_mm_per_token_kernel import (
     fp8_scaled_mm_per_token,
     int8_scaled_mm_per_token,
-    int8_scaled_mm_split_k,
+    scaled_mm_split_k,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
     per_token_group_quant_fp8,
@@ -72,19 +72,18 @@ def quantize_fp8_per_row(input_tensor: torch.Tensor) -> Tuple[torch.Tensor, torc
 
 def _use_fp8_hopper_4096(activation, weight, weight_scale, out, dtype, bias):
     return (
-        activation.shape == (512, 4096)
+        activation.shape[1] == 4096
         and weight.shape == (4096, 4096)
         and weight.T.is_contiguous()
         and weight_scale.numel() in (1, 4096)
         and weight_scale.is_contiguous()
         and out is not None
-        and out.shape == (512, 4096)
+        and out.shape == activation.shape
         and out.is_contiguous()
         and out.dtype == dtype
         and dtype in (torch.float16, torch.bfloat16)
         and (bias is None or (bias.shape == (4096,) and bias.dtype == dtype and bias.is_contiguous()))
         and is_hopper()
-        and triton_support_tensor_descriptor()
     )
 
 
@@ -169,7 +168,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
                 and n % 128 == 0
                 and depth % 128 == 0
             ):
-                return int8_scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out, bias)
+                return scaled_mm_split_k(x_q, qweight, x_scale, weight_scale, out, bias)
             if n == depth == 4096 and 256 <= m <= 640 and m % 64 == 0 and triton_support_tensor_descriptor():
                 return int8_scaled_mm_per_token(
                     x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_INT8_HOPPER_4096_CONFIG, bias=bias
@@ -238,7 +237,11 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         x_q, x_scale = quantize_fp8_per_row(input_tensor)
         m = input_tensor.shape[0]
         n = qweight.shape[1]
-        if _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias):
+        if (
+            m == 512
+            and _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias)
+            and triton_support_tensor_descriptor()
+        ):
             return fp8_scaled_mm_per_token(
                 x_q, qweight, x_scale, weight_scale, out.dtype, out, run_config=_FP8_HOPPER_4096_CONFIG, bias=bias
             )
@@ -469,7 +472,11 @@ class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMetho
             else:
                 out = torch.empty((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         run_config = None
-        if _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias):
+        if (
+            m == 512
+            and _use_fp8_hopper_4096(x_q, qweight, weight_scale, out, input_tensor.dtype, bias)
+            and triton_support_tensor_descriptor()
+        ):
             run_config = _FP8_HOPPER_4096_CONFIG
         return fp8_scaled_mm_per_token(
             x_q,
@@ -491,10 +498,16 @@ class FP8w8a8PerTensorAutoQuantizationMethod(FP8w8a8PerTensorTritonQuantizationM
     def apply(self, input_tensor, weight_pack, out=None, workspace=None, use_custom_tensor_mananger=True, bias=None):
         if not _HAS_SGL_FP8 or input_tensor.shape[-1] % 32 or weight_pack.weight.shape[-2] % 16:
             return super().apply(input_tensor, weight_pack, out, workspace, use_custom_tensor_mananger, bias)
-        weight, weight_scale, quantized, scales, _, channels = self._dynamic_quant_input(
+        weight, weight_scale, quantized, scales, rows, channels = self._dynamic_quant_input(
             input_tensor, weight_pack, use_custom_tensor_mananger, bias
         )
-        if _use_fp8_hopper_4096(quantized, weight, weight_scale, out, input_tensor.dtype, bias):
+        if 0 < rows <= 16 and _use_fp8_hopper_4096(quantized, weight, weight_scale, out, input_tensor.dtype, bias):
+            return scaled_mm_split_k(quantized, weight, scales, weight_scale, out)
+        if (
+            rows == 512
+            and _use_fp8_hopper_4096(quantized, weight, weight_scale, out, input_tensor.dtype, bias)
+            and triton_support_tensor_descriptor()
+        ):
             return fp8_scaled_mm_per_token(
                 quantized, weight, scales, weight_scale, out.dtype, out, run_config=_FP8_HOPPER_4096_CONFIG
             )

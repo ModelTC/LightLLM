@@ -293,7 +293,7 @@ int8_scaled_mm_per_token = scaled_mm_per_token
 
 
 @triton.jit
-def _int8_split_k(
+def _scaled_mm_split_k(
     activation,
     weight,
     partials,
@@ -302,26 +302,27 @@ def _int8_split_k(
     depth: tl.constexpr,
     chunk: tl.constexpr,
     block_n: tl.constexpr,
+    acc_dtype: tl.constexpr,
 ):
     split = tl.program_id(1)
     row = tl.arange(0, 16)
     col = tl.program_id(0) * block_n + tl.arange(0, block_n)
     inner = split * chunk + tl.arange(0, 128)
-    acc = tl.full((16, block_n), 0, tl.int32)
+    acc = tl.full((16, block_n), 0, acc_dtype)
     for offset in range(chunk // 128):
         index = inner + offset * 128
         lhs = tl.load(
             activation + row[:, None] * depth + index[None, :],
             (row[:, None] < rows) & (index[None, :] < depth),
-            0,
+            0.0,
         )
-        rhs = tl.load(weight + col[None, :] * depth + index[:, None], index[:, None] < depth, 0)
-        acc = tl.dot(lhs, rhs, acc, out_dtype=tl.int32)
+        rhs = tl.load(weight + col[None, :] * depth + index[:, None], index[:, None] < depth, 0.0)
+        acc = tl.dot(lhs, rhs, acc, out_dtype=acc_dtype)
     tl.store(partials + (split * rows + row[:, None]) * width + col[None, :], acc, row[:, None] < rows)
 
 
 @triton.jit
-def _int8_split_k_reduce(
+def _scaled_mm_split_k_reduce(
     partials,
     activation_scale,
     weight_scale,
@@ -332,6 +333,7 @@ def _int8_split_k_reduce(
     splits: tl.constexpr,
     block: tl.constexpr,
     has_bias: tl.constexpr,
+    scalar_scale: tl.constexpr,
 ):
     index = tl.program_id(0) * block + tl.arange(0, block)
     split = tl.arange(0, triton.next_power_of_2(splits))
@@ -342,26 +344,42 @@ def _int8_split_k_reduce(
         0,
     )
     row_scale = tl.load(activation_scale + index // width, valid, 0)
-    col_scale = tl.load(weight_scale + index % width, valid, 0)
+    col_scale = tl.load(weight_scale) if scalar_scale else tl.load(weight_scale + index % width, valid, 0)
     result = tl.sum(acc, 0).to(tl.float32) * row_scale * col_scale
     if has_bias:
         result += tl.load(bias + index % width, valid, 0).to(tl.float32)
     tl.store(out + index, result, valid)
 
 
-def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out, bias=None):
+def scaled_mm_split_k(activation, weight, activation_scale, weight_scale, out, bias=None):
     rows, depth = activation.shape
     width = weight.shape[1]
-    narrow_tile = rows > 8 and width <= 4096 and depth <= 5120
-    chunk = 2048 if width >= 6144 else 1024
-    block_n = 32 if narrow_tile else 64
-    reduce_block = 256 if narrow_tile else 128
+    is_int8 = activation.dtype == torch.int8
+    if is_int8:
+        narrow_tile = rows > 8 and width <= 4096 and depth <= 5120
+        chunk = 2048 if width >= 6144 else 1024
+        block_n = 32 if narrow_tile else 64
+        reduce_block = 256 if narrow_tile else 128
+        num_warps = 2 if narrow_tile else 4
+    else:
+        chunk, block_n, reduce_block, num_warps = 512, 128, 256, 4
     splits = triton.cdiv(depth, chunk)
-    partials = torch.empty((splits, rows, width), device=activation.device, dtype=torch.int32)
-    _int8_split_k[(width // block_n, splits)](
-        activation, weight, partials, rows, width, depth, chunk, block_n, num_warps=2 if narrow_tile else 4
+    partials = torch.empty(
+        (splits, rows, width), device=activation.device, dtype=torch.int32 if is_int8 else torch.float32
     )
-    _int8_split_k_reduce[(triton.cdiv(rows * width, reduce_block),)](
+    _scaled_mm_split_k[(width // block_n, splits)](
+        activation,
+        weight,
+        partials,
+        rows,
+        width,
+        depth,
+        chunk,
+        block_n,
+        tl.int32 if is_int8 else tl.float32,
+        num_warps=num_warps,
+    )
+    _scaled_mm_split_k_reduce[(triton.cdiv(rows * width, reduce_block),)](
         partials,
         activation_scale,
         weight_scale,
@@ -372,6 +390,7 @@ def int8_scaled_mm_split_k(activation, weight, activation_scale, weight_scale, o
         splits,
         reduce_block,
         bias is not None,
+        weight_scale.numel() == 1,
         enable_fp_fusion=bias is None,
     )
     return out
