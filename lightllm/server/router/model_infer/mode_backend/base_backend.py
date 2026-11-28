@@ -23,6 +23,8 @@ from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
+from lightllm.server.pd_io_struct import PdPfPrefillPromptIdsRef
+from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.dist_utils import get_global_rank, get_global_world_size, get_dp_size
@@ -821,6 +823,10 @@ class ModeBackend:
                 if req_obj.is_slave_req():
                     continue
 
+                # 折叠时 KV 长度先更新，首 token 的后处理可能尚未完成。
+                if self.args.run_mode == "prefill" and req_obj.cur_kv_len == req_obj.shm_req.input_len:
+                    continue
+
                 # 计算预算按本轮实际处理的 token 数累计，KV 预算按需要额外分配的页容量扣减。
                 token_num, alloc_token_num = req_obj.prefill_need_token_num(
                     is_chuncked_prefill=not self.disable_chunked_prefill
@@ -832,6 +838,8 @@ class ModeBackend:
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
+                    # 已经选进本轮 prefill，后面一定会执行。最后一段在这里上报。
+                    self._report_prefill_first_last_chunk(req_obj=req_obj)
                 elif wait_pause_count < pause_max_req_num:
                     req_obj.wait_pause = True
                     wait_pause_count += 1
@@ -890,6 +898,40 @@ class ModeBackend:
 
         self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
         return prefill_reqs, decode_reqs, prefill_tokens
+
+    def _report_prefill_first_last_chunk(self, req_obj: InferReq) -> None:
+        """选进本轮 prefill 且这段会算完 prompt 时，由本 DP 组的 master 上报一次。
+
+        标记写在本进程的请求上，其他 rank 不写。预算不够没被选中的请求不会进到这里。
+        """
+        if self.args.run_mode != "prefill":
+            return
+        if not req_obj.shm_req.sample_params.pd_prefill_first:
+            return
+        if self.disable_chunked_prefill:
+            scheduled_len = req_obj.get_cur_total_len()
+        else:
+            scheduled_len = req_obj.get_chuncked_input_token_len()
+        if scheduled_len != req_obj.shm_req.input_len:
+            return
+        if not self.is_master_in_dp or hasattr(req_obj, "pd_prefill_prompt_ids_reported"):
+            return
+        req_obj.pd_prefill_prompt_ids_reported = True
+        if not hasattr(self, "pd_prefill_prompt_ids_push"):
+            setattr(self, "pd_prefill_prompt_ids_push", ReportIpc.Push())
+        # 槽位还被本请求占用。pd_report 收到后立刻从共享内存拷出 prompt，再交给 Master 下发 decode。
+        reported = PdPfPrefillPromptIdsRef(
+            group_request_id=int(req_obj.shm_req.sample_params.group_request_id),
+            pd_master_node_id=int(req_obj.sampling_param.pd_master_node_id),
+            shm_index=int(req_obj.shm_req.index_in_shm_mem),
+            input_len=int(req_obj.shm_req.input_len),
+        )
+        self.pd_prefill_prompt_ids_push.send(message=reported)
+        self.logger.debug(
+            f"prefill-first stage=report-prefill-prompt-ids, group_request_id={reported.group_request_id}, "
+            f"shm_index={reported.shm_index}, input_len={reported.input_len}"
+        )
+        return
 
     def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
         """选择本批请求；索引对象统一管理上传区间、提交进度和流依赖。"""

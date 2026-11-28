@@ -81,7 +81,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "PD disaggregation prefill-first mode. Enable it only on the PD master. "
-            "Prefill computes and samples the first token before decode allocates KV pages. "
+            "Decode reserves KV pages when prefill schedules the final prompt chunk. "
+            "KV transfer starts after prefill finishes and decode reports its endpoint. "
+            "A single-output request finishes on prefill and skips decode allocation. "
             "On a full cache match, prefill still sends the last reserved token."
         ),
     )
@@ -714,6 +716,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help="Enable the cudagraph of the prefill stage,"
         " currently only for llama and qwen model, not support ep moe model",
+    )
+    parser.add_argument(
+        "--enable_prefill_overlap",
+        action="store_true",
+        help=(
+            "Overlap successive prefill steps on a prefill node. Disabled by default. "
+            "Leave it off when low concurrency needs a lower time to first token. "
+            "Decode and normal modes ignore this flag."
+        ),
     )
     parser.add_argument(
         "--prefill_cudagraph_max_handle_token",

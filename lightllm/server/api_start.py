@@ -491,7 +491,7 @@ def _launch_subprocesses(args: StartArgs):
         start_args=[(args,)],
     )
 
-    if args.run_mode == "decode":
+    if args.run_mode in ("prefill", "decode"):
         from .pd_report.manager import start_pd_report_process
 
         process_manager.start_submodule_processes(

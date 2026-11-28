@@ -10,7 +10,9 @@ import copy
 import hashlib
 import datetime
 import pickle
+import numpy as np
 from array import array
+from itertools import repeat
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -321,7 +323,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     def generate(
         self,
-        prompt: Union[str, List[int]],
+        prompt: Union[str, Sequence[int], np.ndarray],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -336,7 +338,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def _generate(
         self,
-        prompt: Union[str, List[int]],
+        prompt: Union[str, Sequence[int], np.ndarray],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,
@@ -639,7 +641,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
         return
 
     async def _encode(
-        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
+        self,
+        prompt: Union[str, Sequence[int], np.ndarray],
+        multimodal_params: MultimodalParams,
+        sampling_params: SamplingParams,
     ):
         if isinstance(prompt, str):
             # pre-verify prompt length
@@ -676,8 +681,13 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 )
             return prompt_ids
 
+        if isinstance(prompt, np.ndarray):
+            if self.pd_mode.is_D() and prompt.ndim == 1 and prompt.dtype == np.int64:
+                return prompt
+            raise InvalidRequestError("PD Decode prompt arrays must be one-dimensional int64 arrays.")
+
         # 这里的校验对多模态不是很充分, to do
-        if all(isinstance(e, int) for e in prompt):
+        if all(map(isinstance, prompt, repeat(int))):
             if not self.enable_multimodal and self.pd_mode.is_P_or_NORMAL():
                 if all(e < self.vocab_size for e in prompt):
                     return prompt
@@ -714,10 +724,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.max_req_total_len,
         )
 
-    async def _check_and_repair_length(self, prompt_ids: Sequence[int], sampling_params: SamplingParams):
-        if not prompt_ids:
-            raise InvalidRequestError("The input prompt must not be empty.")
+    async def _check_and_repair_length(
+        self, prompt_ids: Union[Sequence[int], np.ndarray], sampling_params: SamplingParams
+    ):
         prompt_tokens = len(prompt_ids)
+        if prompt_tokens == 0:
+            raise InvalidRequestError("The input prompt must not be empty.")
         # -36 用于保留通用边界余量，MTP overlap 所需的额外 KV 窗口由
         # get_real_supported_max_req_total_len 单独扣除。
         real_supported_max_req_total_len = self.get_real_supported_max_req_total_len()
@@ -820,7 +832,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def _wait_to_token_package(
         self,
         start_time,
-        prompt_ids: List[int],
+        prompt_ids: Union[Sequence[int], np.ndarray],
         group_request_id: int,
         sampling_params: SamplingParams,
         req_status: "ReqStatus",

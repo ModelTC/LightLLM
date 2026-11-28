@@ -1,6 +1,7 @@
 import torch.multiprocessing as mp
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from .prefill_impl import PDChunkedPrefillForPrefillNode, PDChunckedTransTask
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
@@ -11,7 +12,7 @@ logger = init_logger(__name__)
 class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
-        self.support_overlap = False
+        self.support_overlap = get_env_start_args().enable_prefill_overlap
         self.info_queue: mp.Queue = info_queue
         self.classed_req_no_decode = True
         self.pd_prefill_chunked_handle_func = self._prefill_chuncked_handle_func
@@ -51,6 +52,9 @@ class PDDPChunkedForPrefillNode(DPChunkedPrefillBackend):
             next_token_prob=next_token_prob,
             output_len=output_len,
         )
+
+    def _prefill_first_decode_kv_is_ready(self, req_obj: InferReq) -> bool:
+        return PDChunkedPrefillForPrefillNode._prefill_first_decode_kv_is_ready(self, req_obj=req_obj)
 
     def _on_pf_decode_kv_ready(self, req_id: int) -> None:
         return PDChunkedPrefillForPrefillNode._on_pf_decode_kv_ready(self, req_id=req_id)

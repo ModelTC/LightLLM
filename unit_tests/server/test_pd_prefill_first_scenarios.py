@@ -10,20 +10,27 @@ import gc
 import pickle
 import weakref
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
 
+from lightllm.server.core.objs import FinishStatus
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
+from lightllm.server.core.objs.pd_kv_trans_params import PDKVTransParamObj
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo
 from lightllm.server.router.manager import RouterManager
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
 from lightllm.server.router.model_infer.mode_backend.pd.helper import iter_kv_spans, submit_prefill_first_tasks_if_ready
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
     PDChunkedPrefillForPrefillNode,
+)
+from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl_for_dp import (
+    PDDPChunkedForPrefillNode,
 )
 
 
@@ -45,10 +52,12 @@ class _Req:
         self.req_idx = 0
         self.cur_kv_len = cur_kv_len
         self.shm_req = _ShmReq(input_len=input_len)
+        trans_params = PDKVTransParamObj()
+        trans_params.set(payload)
         self.sampling_param = SimpleNamespace(
             shm_param=SimpleNamespace(
                 pd_prefill_first=prefill_first,
-                pd_kv_trans_params=SimpleNamespace(get=lambda: payload, data_len=len(payload)),
+                pd_kv_trans_params=trans_params,
             ),
             pd_decode_node=_decode_info(ready_kv_len=0),
             pd_master_node_id=2,
@@ -84,6 +93,7 @@ def _prefill_backend(queue):
     backend.is_master_in_dp = True
     backend.info_queue = queue
     backend.node_world_size = 1
+    backend.dp_world_size = 1
     backend.dp_rank_in_node = 0
     return backend
 
@@ -136,10 +146,21 @@ def test_03_empty_span_and_bad_page_size_are_rejected():
 
 def test_04_pf_messages_do_not_reuse_old_handshake_values():
     assert ObjType.PD_PF_PREFILL_REQ.value == 10
-    assert ObjType.PD_PF_PREFILL_KV_READY.value == 11
+    assert ObjType.PD_PF_PREFILL_PROMPT_IDS.value == 11
     assert ObjType.PD_PF_DECODE_KV_READY.value == 12
     assert ObjType.PD_PF_PREFILL_REQ != ObjType.REQ
     assert ObjType.PD_PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO
+
+
+def test_prefill_overlap_defaults_off_and_can_be_enabled():
+    from lightllm.server.api_cli import add_cli_args
+
+    assert StartArgs().enable_prefill_overlap is False
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)
+    assert parser.parse_args([]).enable_prefill_overlap is False
+    assert parser.parse_args(["--enable_prefill_overlap"]).enable_prefill_overlap is True
+    assert "lower time to first token" in parser.format_help()
 
 
 def test_05_schedule_interval_default_is_5ms_and_cli_help_is_english():
@@ -232,6 +253,54 @@ def test_12_filter_does_not_hold_an_old_mode_finished_request(monkeypatch):
     assert ready == [req]
 
 
+@pytest.mark.parametrize("backend_cls", [PDChunkedPrefillForPrefillNode, PDDPChunkedForPrefillNode])
+def test_prefill_overlap_skips_completed_prompt_before_post_handle(monkeypatch, runtime_start_args, backend_cls):
+    monkeypatch.setattr(base_backend, "ShmReqManager", Mock())
+    backend = backend_cls(info_queue=Mock())
+    assert backend.support_overlap
+    backend.args = SimpleNamespace(run_mode="prefill", enable_cpu_cache=False, enable_prefill_decode_mixed=False)
+    backend.is_master_in_dp = True
+    backend.disable_chunked_prefill = False
+    backend.batch_max_tokens = 16
+    backend._timer_merge_radix_tree = Mock()
+    backend._copy_req_token_indexes_to_gpu = Mock()
+    backend._report_prefill_first_last_chunk = Mock()
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **_: reqs)
+
+    finished_prompt = _req(req_id=1, input_len=4, cur_kv_len=3)
+    pending_tail = _req(req_id=2, input_len=4, cur_kv_len=3)
+    for req in (finished_prompt, pending_tail):
+        req.filter_mark = req.wait_pause = req.paused = False
+        req.finish_status = FinishStatus()
+        req.is_slave_req = lambda: False
+        req.prefill_need_token_num = Mock(return_value=(1, 0))
+        req.alloc_kv_mem = Mock()
+    finished_prompt.cur_output_len = 0
+    finished_prompt.get_cur_total_len = lambda: finished_prompt.shm_req.input_len + finished_prompt.cur_output_len
+    finished_prompt.get_chuncked_input_token_len = lambda: finished_prompt.shm_req.input_len
+    _install_mapping(monkeypatch, finished_prompt, pending_tail)
+    monkeypatch.setattr(g_infer_context, "get_can_alloc_token_num", lambda: 16)
+    monkeypatch.setattr(g_infer_context, "cache_placement_controller", Mock())
+    monkeypatch.setattr(g_infer_context, "filter_reqs", Mock())
+    monkeypatch.setattr(g_infer_context, "pause_reqs", Mock())
+
+    backend._pre_post_handle([finished_prompt], is_chuncked_mode=True)
+    assert finished_prompt.cur_output_len == 1
+    assert not finished_prompt.finish_status.is_finished()
+
+    assert backend._get_classed_reqs(req_ids=[1, 2], no_decode=backend.classed_req_no_decode) == ([pending_tail], [], 1)
+    finished_prompt.prefill_need_token_num.assert_not_called()
+    finished_prompt.alloc_kv_mem.assert_not_called()
+    backend._report_prefill_first_last_chunk.assert_called_once_with(req_obj=pending_tail)
+
+    finished_prompt.cpu_cache_offload_task_status = SimpleNamespace(is_not_started=lambda: True)
+    finished_prompt.finish_status.set_status(FinishStatus.FINISHED_LENGTH)
+    assert backend._get_classed_reqs(req_ids=[1], no_decode=backend.classed_req_no_decode) == ([], [], 0)
+    assert finished_prompt.filter_mark
+    assert backend._get_classed_reqs(req_ids=[1], no_decode=backend.classed_req_no_decode) == ([], [], 0)
+    g_infer_context.filter_reqs.assert_called_with(finished_reqs=[finished_prompt])
+
+
 def test_13_filter_keeps_an_in_progress_prefill_first_request_schedulable(monkeypatch):
     req = _req(req_id=3, input_len=10, cur_kv_len=4)
     _install_mapping(monkeypatch, req)
@@ -277,15 +346,22 @@ def test_17_ready_command_on_an_aborted_request_drops_the_attribute_without_tran
     assert not hasattr(req, "pd_wait_decode_kv_info_ready")
 
 
-def test_18_ready_command_puts_the_first_token_on_the_last_task_including_att_state(monkeypatch):
+@pytest.mark.parametrize("endpoint_ready_before_prefill", [False, True], ids=["late_endpoint", "early_endpoint"])
+def test_18_first_token_is_on_the_last_task_including_att_state(monkeypatch, endpoint_ready_before_prefill):
     info = _decode_info(ready_kv_len=1)
     payload = pickle.dumps(info)
-    req = _req(req_id=9, input_len=6, cur_kv_len=6, payload=payload)
-    backend = _prefill_backend(queue=SimpleNamespace(put=lambda task: queued.append(task)))
+    req = _req(req_id=9, input_len=6, cur_kv_len=6, payload=payload if endpoint_ready_before_prefill else b"")
     queued = []
+    backend = _prefill_backend(queue=SimpleNamespace(put=queued.append))
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
-    backend._pf_prefill_chuncked_handle_func(req_obj=req, next_token_id=21, next_token_prob=-0.4, output_len=1)
     _install_mapping(monkeypatch, req)
+    backend._pf_prefill_chuncked_handle_func(req_obj=req, next_token_id=21, next_token_prob=-0.4, output_len=1)
+    if endpoint_ready_before_prefill:
+        assert len(queued) == 3
+    else:
+        assert queued == []
+        assert hasattr(req, "pd_wait_decode_kv_info_ready")
+        req.sampling_param.shm_param.pd_kv_trans_params.set(payload)
     backend._on_pf_decode_kv_ready(req_id=9)
     assert [(task.start_kv_index, task.end_kv_index, task.page_kind) for task in queued] == [
         (1, 5, "kv"),

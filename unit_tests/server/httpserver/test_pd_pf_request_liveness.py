@@ -1,17 +1,23 @@
 """PD waits abort the current segment when its original choice is inactive."""
 
+from builtins import anext
 import asyncio
 import pickle
 import time
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams, StartArgs
+from lightllm.server.httpserver.pd_pf_prefill_node import (
+    run_pd_pf_prefill_request,
+    write_prefill_first_decode_node_info,
+)
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillPromptIds
 from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
 
 
@@ -20,8 +26,11 @@ ORIGIN_ID = 80
 SIBLING_ID = 81
 
 
-def _token(text, count, finish=FinishStatus.NO_FINISH):
-    return GROUP_ID, text, {"id": count, "count_output_tokens": count}, FinishStatus(finish)
+def _token(text, count, finish=FinishStatus.NO_FINISH, node_mode=None):
+    metadata = {"id": count, "count_output_tokens": count}
+    if node_mode is not None:
+        metadata["node_mode"] = node_mode
+    return GROUP_ID, text, metadata, FinishStatus(finish)
 
 
 class _Session:
@@ -37,7 +46,7 @@ class _Session:
         self.params.group_request_id = GROUP_ID
         self.tokens = tokens
         self.hold_handshake = False
-        self.hold_prefill_ready = False
+        self.hold_prefill_prompt_ids = False
         self.failed_sends = set()
         self.messages = {"p": [], "d": []}
         self.request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
@@ -83,15 +92,21 @@ class _Session:
         message = self._record("p", payload)
         if message[0] == ObjType.PD_PF_PREFILL_REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
-            self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(GROUP_ID, [1, 2])
-            if not self.hold_prefill_ready:
-                self.status.pf_prefill_kv_ready_event.set()
-            self.status.out_token_info_list.append(_token("hello", 1, FinishStatus.FINISHED_LENGTH))
+            self.status.pf_prefill_prompt_ids_event.reported = PdPfPrefillPromptIds(
+                group_request_id=GROUP_ID,
+                pd_master_node_id=self.manager.args.pd_node_id,
+                prompt_ids=np.array([1, 2], dtype=np.int64),
+            )
+            if not self.hold_prefill_prompt_ids:
+                self.status.pf_prefill_prompt_ids_event.set()
+            self.status.out_token_info_list.append(
+                _token("hello", 1, FinishStatus.FINISHED_LENGTH, node_mode="prefill")
+            )
             self.status.event.set()
         elif message[0] == ObjType.REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
             self.status.prefill_prompt_ids_event.prompt_ids = [1, 2]
-            if not self.hold_prefill_ready:
+            if not self.hold_prefill_prompt_ids:
                 self.status.prefill_prompt_ids_event.set()
 
     async def _send_decode(self, payload):
@@ -195,9 +210,9 @@ def test_stop_during_handshake_aborts_only_current_choice(prefill_first, wrap_de
     async def run():
         session = _Session(prefill_first=prefill_first, wrap_default=wrap_default)
         session.hold_handshake = True
-        session.hold_prefill_ready = stage == "prefill"
+        session.hold_prefill_prompt_ids = stage == "prefill"
         target_stage = (
-            {"prefill": "pf-prefill-kv-ready", "decode": "prefill-first-decode"}[stage] if prefill_first else stage
+            {"prefill": "pf-prefill-prompt-ids", "decode": "prefill-first-decode"}[stage] if prefill_first else stage
         )
         waiting = asyncio.Event()
         handshake_event = None
@@ -245,7 +260,7 @@ def test_stop_during_handshake_aborts_only_current_choice(prefill_first, wrap_de
     asyncio.run(asyncio.wait_for(run(), timeout=3))
 
 
-@pytest.mark.parametrize("stage", ["prefill", "decode", "pf-prefill-kv-ready", "prefill-first-decode"])
+@pytest.mark.parametrize("stage", ["prefill", "decode", "pf-prefill-prompt-ids", "prefill-first-decode"])
 @pytest.mark.parametrize("ready", [False, True])
 def test_wait_raises_request_stopped_for_original_id(stage, ready):
     async def run():
@@ -323,5 +338,212 @@ def test_existing_segment_preserves_failure_cleanup(failure):
                 pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
             await session.stream.aclose()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_decode_is_reserved_before_the_prefill_token_arrives():
+    async def run():
+        session = _Session()
+        ready = asyncio.Event()
+        decode = asyncio.Event()
+        send_prefill = session.p_ws.send_bytes.side_effect
+        send_decode = session.d_ws.send_bytes.side_effect
+
+        async def hold_token(payload):
+            await send_prefill(payload)
+            if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+                session.status.out_token_info_list.clear()
+                session.status.event.clear()
+                ready.set()
+
+        async def on_decode(payload):
+            await send_decode(payload)
+            if pickle.loads(payload)[0] == ObjType.REQ:
+                decode.set()
+
+        session.p_ws.send_bytes.side_effect = hold_token
+        session.d_ws.send_bytes.side_effect = on_decode
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(ready.wait(), timeout=2)
+        await asyncio.wait_for(decode.wait(), timeout=2)
+        decode_prompt = session.messages["d"][0][1][0]
+        assert decode_prompt.dtype == np.int64
+        np.testing.assert_array_equal(decode_prompt, [1, 2])
+        assert not pending.done()
+
+        async def endpoint_sent():
+            while not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"]):
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(endpoint_sent(), timeout=2)
+        assert not pending.done()
+        session.status.out_token_info_list.append(_token("first", 1, FinishStatus.FINISHED_LENGTH, node_mode="prefill"))
+        session.status.event.set()
+        assert (await asyncio.wait_for(pending, timeout=2))[1] == "first"
+        assert decode.is_set()
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(run())
+
+
+def test_prefill_token_is_taken_when_decode_output_is_ahead():
+    async def run():
+        session = _Session()
+        send_prefill = session.p_ws.send_bytes.side_effect
+
+        async def put_decode_token_first(payload):
+            await send_prefill(payload)
+            if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+                session.status.out_token_info_list.insert(0, _token("skip", 1, node_mode="decode"))
+
+        session.p_ws.send_bytes.side_effect = put_decode_token_first
+        first = await anext(session.stream)
+        assert first[1] == "hello"
+        assert not first[3].is_finished()
+        assert [item[1] for item in session.status.out_token_info_list] == ["skip"]
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_decode_node_info_is_written_when_the_notification_arrives():
+    transfer = Mock()
+    requests = {
+        GROUP_ID: SimpleNamespace(
+            group_req_objs=SimpleNamespace(
+                shm_req_objs=[
+                    SimpleNamespace(sample_params=SimpleNamespace(pd_kv_trans_params=SimpleNamespace(set=transfer)))
+                ]
+            )
+        )
+    }
+    info = SimpleNamespace(ready_kv_len=3)
+    manager = SimpleNamespace(req_id_to_out_inf=requests)
+    wrote = write_prefill_first_decode_node_info(manager=manager, group_request_id=GROUP_ID, decode_node_info=info)
+    assert wrote is True
+    payload = transfer.call_args.args[0]
+    assert pickle.loads(payload).ready_kv_len == 3
+
+    missing = write_prefill_first_decode_node_info(
+        manager=SimpleNamespace(req_id_to_out_inf={}),
+        group_request_id=GROUP_ID,
+        decode_node_info=info,
+    )
+    assert missing is False
+
+
+def test_session_does_not_poll_for_prefill_prompt_ids():
+    async def run():
+        params = SamplingParams()
+        params.init(None, max_new_tokens=1)
+        params.group_request_id = GROUP_ID
+        requests = {GROUP_ID: SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[SimpleNamespace()]))}
+        decode_ready = asyncio.Event()
+        decode_ready.decode_node_info = SimpleNamespace(ready_kv_len=0)
+        decode_ready.set()
+
+        async def generate(**kwargs):
+            yield _token("first", 1, FinishStatus.FINISHED_LENGTH)
+            requests.pop(GROUP_ID, None)
+
+        manager = SimpleNamespace(
+            args=SimpleNamespace(run_mode="prefill"), req_id_to_out_inf=requests, generate=generate
+        )
+        ws = SimpleNamespace(send=AsyncMock())
+        await run_pd_pf_prefill_request(
+            manager, "prompt", params, MultimodalParams(), asyncio.Queue(), ws, decode_ready
+        )
+        ws.send.assert_not_awaited()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_last_chunk_single_output_never_submits_decode():
+    async def run():
+        session = _Session()
+        session.params.max_new_tokens = 1
+        assert (await anext(session.stream))[3].is_finished_length()
+        assert session.messages["p"][0][1][1].pd_prefill_first
+        assert not session.messages["d"]
+        await session.stream.aclose()
+        session.assert_cleaned(has_decode=False)
+
+    asyncio.run(run())
+
+
+def test_stop_during_last_chunk_releases_decode_reservation():
+    async def run():
+        session = _Session()
+        original_send = session.d_ws.send_bytes.side_effect
+
+        async def stop_before_first_token(payload):
+            await original_send(payload)
+            if pickle.loads(payload)[0] == ObjType.REQ:
+                session.status.out_token_info_list.clear()
+                await session.manager.stop_request(ORIGIN_ID)
+
+        session.d_ws.send_bytes.side_effect = stop_before_first_token
+        with pytest.raises(StopAsyncIteration):
+            await anext(session.stream)
+        session.assert_cleaned()
+        assert not any(m[0] == ObjType.PD_PF_DECODE_KV_READY for m in session.messages["p"])
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def _hold_token_until_decode(session):
+    ready = asyncio.Event()
+    decode = asyncio.Event()
+    send_prefill = session.p_ws.send_bytes.side_effect
+    send_decode = session.d_ws.send_bytes.side_effect
+
+    async def hold_token(payload):
+        await send_prefill(payload)
+        if pickle.loads(payload)[0] == ObjType.PD_PF_PREFILL_REQ:
+            session.status.out_token_info_list.clear()
+            session.status.event.clear()
+            ready.set()
+
+    async def on_decode(payload):
+        await send_decode(payload)
+        if pickle.loads(payload)[0] == ObjType.REQ:
+            decode.set()
+
+    session.p_ws.send_bytes.side_effect = hold_token
+    session.d_ws.send_bytes.side_effect = on_decode
+    return ready, decode
+
+
+def test_finished_first_token_after_reservation_skips_transfer():
+    async def run():
+        session = _Session()
+        _, decode = _hold_token_until_decode(session)
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(decode.wait(), timeout=2)
+        session.status.out_token_info_list.append(_token("end", 1, FinishStatus.FINISHED_STOP, node_mode="prefill"))
+        session.status.event.set()
+        item = await asyncio.wait_for(pending, timeout=2)
+        assert item[1] == "end"
+        assert item[3].is_finished()
+        await session.stream.aclose()
+        session.assert_cleaned()
+
+    asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+def test_disconnect_after_reservation_aborts_decode():
+    async def run():
+        session = _Session()
+        _, decode = _hold_token_until_decode(session)
+        pending = asyncio.create_task(anext(session.stream))
+        await asyncio.wait_for(decode.wait(), timeout=2)
+        session.request.is_disconnected = AsyncMock(return_value=True)
+        session.status.event.set()
+        with pytest.raises(ClientDisconnected):
+            await pending
+        session.assert_cleaned()
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))

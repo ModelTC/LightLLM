@@ -88,6 +88,19 @@ def test_kv_status_on_pd_report_updates_the_request(monkeypatch):
     manager.put_to_handle_queue.assert_not_awaited()
 
 
+def test_generate_error_on_pd_report_enters_the_handle_queue(monkeypatch):
+    from fastapi import WebSocketDisconnect
+    from lightllm.server.pd_io_struct import ObjType
+
+    notice = (ObjType.PD_UPLOAD_GENERATE_ERROR, 9, "ValueError: shm gone")
+    manager = _manager(monkeypatch)
+    websocket = _websocket(receive_bytes=AsyncMock(side_effect=[pickle.dumps(notice), WebSocketDisconnect()]))
+    asyncio.run(api_http_pd.receive_pd_report(websocket))
+    manager.put_to_handle_queue.assert_awaited_once_with(obj=notice)
+    manager.update_req_status.assert_not_awaited()
+    manager.register_pd.assert_not_awaited()
+
+
 def test_kv_status_is_forwarded_on_the_register_connection(monkeypatch):
     from fastapi import WebSocketDisconnect
     from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus

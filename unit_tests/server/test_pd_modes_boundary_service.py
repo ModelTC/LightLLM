@@ -199,12 +199,13 @@ def test_response_boundaries(pd_service, case):
             segment.prefill_finish = FinishStatus.FINISHED_LENGTH
         elif case == "prefill_stop":
             segment.prefill_finish, expected = FinishStatus.FINISHED_STOP, "hello"
+            segment.hold_upkv = pd_service[1]
         elif case == "cache_full":
             segment.prompt_ids, segment.ready_kv_len = [2, 3, 2], 2
         elif case == "large_ids":
             segment.prompt_ids = [1, 2 ** 40, 2 ** 63 - 1]
         elif case == "ready_before_token":
-            segment.token_before_kv_ready = False
+            segment.token_before_prompt_ids = False
         elif case in ("error_terminal_index_one", "abort_terminal_index_one"):
             finish = FinishStatus.FINISHED_ERROR if case.startswith("error") else FinishStatus.FINISHED_ABORTED
             segment.decode_steps = (("hello", FinishStatus.NO_FINISH, 1), ("", finish, 1))
@@ -223,8 +224,13 @@ def test_response_boundaries(pd_service, case):
             assert len({req["params"]["group_request_id"] for req in peers.prefill_reqs}) == count
             if case == "large_ids":
                 assert peers.decode_reqs[0]["prompt_ids"] == segment.prompt_ids
-            if pd_service[1] and case in ("length_one", "prefill_stop"):
+            if pd_service[1] and case == "length_one":
                 assert not peers.decode_reqs
+            elif pd_service[1] and case == "prefill_stop":
+                request_id = peers.prefill_reqs[0]["params"]["group_request_id"]
+                await _assert_aborted(peers, request_id)
+                assert [req["params"]["group_request_id"] for req in peers.decode_reqs] == [request_id]
+                assert not peers.kv_ready
 
     _run(pd_service, scenario)
 

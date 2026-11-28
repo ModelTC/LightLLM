@@ -4,6 +4,28 @@ import numpy as np
 import torch
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+
+
+def _patch_empty_input_context(monkeypatch):
+    mem_manager = SimpleNamespace(
+        HOLD_TOKEN_MEMINDEXES=(-1,),
+        alloc=lambda size: torch.empty((size,), dtype=torch.int32),
+    )
+    infer_context = SimpleNamespace(
+        args=SimpleNamespace(page_size=1, run_mode="normal"),
+        req_manager=SimpleNamespace(
+            HOLD_REQUEST_ID=-1,
+            mem_manager=mem_manager,
+            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
+        ),
+        radix_cache=None,
+    )
+    return infer_context
+
+
+def _patch_overlap_input_context(monkeypatch):
+    return _patch_empty_input_context(monkeypatch)
 
 
 def _make_prefill_req(req_idx: int, token_num: int):
@@ -182,3 +204,91 @@ def test_overlap_decode_preserves_empty_microbatch():
     assert run_reqs1 == []
     assert model_input1.batch_size == 0
     assert model_input1.b_req_idx.shape == (0,)
+
+
+class _ReadyPush:
+    def __init__(self) -> None:
+        self.sent = []
+
+    def send(self, message) -> None:
+        self.sent.append(message)
+
+
+def _report_backend(run_mode: str, is_master_in_dp: bool, disable_chunked_prefill: bool) -> SimpleNamespace:
+    return SimpleNamespace(
+        args=SimpleNamespace(run_mode=run_mode),
+        is_master_in_dp=is_master_in_dp,
+        disable_chunked_prefill=disable_chunked_prefill,
+        logger=SimpleNamespace(debug=lambda *args, **kwargs: None),
+    )
+
+
+def _attach_prompt(req, group_request_id: int, prompt_ids: list, pd_master_node_id: int) -> None:
+    req.shm_req.index_in_shm_mem = group_request_id
+    req.shm_req.sample_params.group_request_id = group_request_id
+    req.sampling_param = SimpleNamespace(pd_master_node_id=pd_master_node_id)
+
+
+def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch):
+    monkeypatch.setattr(
+        "lightllm.server.router.model_infer.mode_backend.base_backend.ReportIpc.Push",
+        _ReadyPush,
+    )
+    backend = _report_backend(run_mode="prefill", is_master_in_dp=True, disable_chunked_prefill=False)
+    reqs = [_make_prefill_req(i, 8) for i in range(3)]
+    for i, req in enumerate(reqs):
+        req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=i != 2))
+        req.get_chuncked_input_token_len = lambda: 8
+        _attach_prompt(req, group_request_id=i, prompt_ids=[i], pd_master_node_id=7)
+    # The first request still has another chunk. The second resumes from a cached prefix.
+    reqs[0].get_chuncked_input_token_len = lambda: 4
+    reqs[1].cur_kv_len = 6
+    for req in reqs:
+        ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    assert [hasattr(req, "pd_prefill_prompt_ids_reported") for req in reqs] == [False, True, False]
+
+    backend.disable_chunked_prefill = True
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=reqs[0])
+    assert hasattr(reqs[0], "pd_prefill_prompt_ids_reported")
+
+
+def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
+    monkeypatch.setattr(
+        "lightllm.server.router.model_infer.mode_backend.base_backend.ReportIpc.Push",
+        _ReadyPush,
+    )
+    backend = _report_backend(run_mode="prefill", is_master_in_dp=True, disable_chunked_prefill=False)
+    req = _make_prefill_req(req_idx=1, token_num=8)
+    req.cur_kv_len = 6
+    req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
+    req.get_chuncked_input_token_len = lambda: 8
+    _attach_prompt(req, group_request_id=9, prompt_ids=[-(2 ** 63), 2 ** 63 - 1], pd_master_node_id=100)
+
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+
+    (report,) = backend.pd_prefill_prompt_ids_push.sent
+    assert (report.group_request_id, report.pd_master_node_id, report.shm_index, report.input_len) == (
+        9,
+        100,
+        req.shm_req.index_in_shm_mem,
+        req.shm_req.input_len,
+    )
+    assert hasattr(req, "pd_prefill_prompt_ids_reported")
+
+    backend.is_master_in_dp = False
+    other = _make_prefill_req(req_idx=2, token_num=8)
+    other.cur_kv_len = 6
+    other.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
+    other.get_chuncked_input_token_len = lambda: 8
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=other)
+    assert len(backend.pd_prefill_prompt_ids_push.sent) == 1
+    assert not hasattr(other, "pd_prefill_prompt_ids_reported")
+
+
+def test_decode_node_does_not_signal_last_chunk():
+    backend = _report_backend(run_mode="decode", is_master_in_dp=True, disable_chunked_prefill=True)
+    req = _make_prefill_req(0, 8)
+    req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
+    ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
+    assert not hasattr(req, "pd_prefill_prompt_ids_reported")

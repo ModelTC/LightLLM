@@ -1,4 +1,7 @@
-"""Decode 推理进程把上报推到这里，这里再写给目标 PD Master 的 /pd_report。"""
+"""推理进程把上报推到这里，这里再写给目标 PD Master 的 /pd_report。
+
+Decode 上报 KV 握手。Prefill 在最后一段被调度时上报 prompt，让 decode 开始占页。
+"""
 
 import asyncio
 import inspect
@@ -8,10 +11,18 @@ import socket
 from multiprocessing.connection import Connection
 from typing import Dict
 
+import numpy as np
 import setproctitle
 
 from lightllm.server.core.objs import StartArgs
-from lightllm.server.pd_io_struct import ObjType, PDUpKVStatus, PD_Master_Obj
+from lightllm.server.pd_io_struct import (
+    ObjType,
+    PDUpKVStatus,
+    PdPfPrefillPromptIds,
+    PdPfPrefillPromptIdsRef,
+    PD_Master_Obj,
+)
+from lightllm.utils.shm_utils import create_or_link_shm
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_unique_server_name
 from lightllm.utils.graceful_utils import graceful_registry
@@ -34,10 +45,10 @@ def start_pd_report_process(args: StartArgs, pipe_writer: Connection) -> None:
 
 
 class PdReportManager:
-    """把本机 Decode 推理进程的 KV 握手转到对应 PD Master 的 /pd_report。
+    """把本机推理进程的上报转到对应 PD Master 的 /pd_report。
 
-    本地 ZMQ PULL 收到 PDUpKVStatus 后，按它自己的 pd_master_node_id 放进该 Master
-    的发送队列。每个 Master 一条 websocket，断线只重连这一条，不碰其他 Master。
+    本地 ZMQ PULL 收到上报后，按它自己的 pd_master_node_id 放进该 Master 的发送队列。
+    每个 Master 一条 websocket，断线只重连这一条，不碰其他 Master。
     """
 
     def __init__(self, args: StartArgs, pull: ReportIpc.Pull) -> None:
@@ -72,19 +83,50 @@ class PdReportManager:
             logger.info("pd report manager stopped")
 
     async def _recv_reports(self) -> None:
-        """从本地 PULL 收 PDUpKVStatus，按它的 pd_master_node_id 放进对应发送队列。
+        """从本地 PULL 收上报，按 pd_master_node_id 放进对应发送队列。
 
-        收到的不是这个对象，说明本机通道坏了，记日志后退出进程。目标 Master 还没有队列时先建一个，
-        握手留在里面，等连接建立后由发送循环写出。收包或反序列化失败由 PULL 记日志并退出进程。
-        本循环被取消时，CancelledError 继续向外抛。
+        Decode 的是 PDUpKVStatus。Prefill 最后一段先给槽位，这里从共享内存读出 prompt 再上报。
+        读槽失败时上报生成错误，Master 结束这条请求并释放两端资源。收到别的对象，说明本机通道坏了，
+        记日志后退出进程。目标 Master 还没有队列时先建一个，上报留在里面，等连接建立后由发送循环写出。
+        收包或反序列化失败由 PULL 记日志并退出进程。本循环被取消时，CancelledError 继续向外抛。
         """
         logger.info("pd report recv loop started")
         while True:
             status = await self._pull.recv()
-            if not isinstance(status, PDUpKVStatus):
+            if isinstance(status, PDUpKVStatus):
+                master_id = status.pd_master_node_id
+                item = (ObjType.PD_UPLOAD_KV_STATUS, status)
+            elif isinstance(status, PdPfPrefillPromptIdsRef):
+                try:
+                    prompt_ids = self._read_prefill_prompt_ids(shm_index=status.shm_index, input_len=status.input_len)
+                except BaseException as exc:
+                    if isinstance(exc, asyncio.CancelledError):
+                        raise
+                    logger.exception(
+                        f"pd report read prefill prompt failed, shm_index={status.shm_index}, "
+                        f"input_len={status.input_len}: {exc}"
+                    )
+                    # 读槽失败交给 Master。请求循环醒来后 abort，prefill 和 decode 都会放开占用的资源。
+                    master_id = status.pd_master_node_id
+                    item = (
+                        ObjType.PD_UPLOAD_GENERATE_ERROR,
+                        status.group_request_id,
+                        f"{type(exc).__name__}: {exc}",
+                    )
+                else:
+                    reported = PdPfPrefillPromptIds(
+                        group_request_id=status.group_request_id,
+                        pd_master_node_id=status.pd_master_node_id,
+                        prompt_ids=prompt_ids,
+                    )
+                    master_id = reported.pd_master_node_id
+                    item = (ObjType.PD_PF_PREFILL_PROMPT_IDS, reported)
+            elif isinstance(status, PdPfPrefillPromptIds):
+                master_id = status.pd_master_node_id
+                item = (ObjType.PD_PF_PREFILL_PROMPT_IDS, status)
+            else:
                 logger.error(f"pd report dropped malformed local message {status!r}")
                 os._exit(1)
-            master_id = status.pd_master_node_id
             queue = self._queues.get(master_id)
             # 连接可能还没建立。先备好队列把这条握手留住，等 _serve_master 连上再发。
             if queue is None:
@@ -100,8 +142,8 @@ class PdReportManager:
                         self._queues.pop(master_id, None)
 
                 asyncio.create_task(drop_if_absent(master_id=master_id, queue=queue))
-            queue.put_nowait((ObjType.PD_UPLOAD_KV_STATUS, status))
-            logger.info(f"pd report queued upkv_status for master {master_id}: {status}")
+            queue.put_nowait(item)
+            logger.info(f"pd report queued {item[0].name} for master {master_id}: {status}")
 
     async def _watch_masters(self) -> None:
         """每 30 秒按当前 PD Master 列表对齐连接。
@@ -187,3 +229,21 @@ class PdReportManager:
             # 只删除仍然是自己这把的队列，避免把新建的那把删掉。
             if self._queues.get(master.node_id) is outgoing:
                 self._queues.pop(master.node_id, None)
+
+    def _read_prefill_prompt_ids(self, shm_index: int, input_len: int) -> np.ndarray:
+        """从 prefill 请求槽的 prompt 共享内存拷出 input_len 个 token。"""
+        if shm_index < 0 or input_len < 0:
+            raise ValueError(f"invalid prefill prompt ref shm_index={shm_index}, input_len={input_len}")
+        shm = create_or_link_shm(name=f"shm_prompts_{shm_index}", expected_size=-1, force_mode="link")
+        try:
+            itemsize = np.dtype(np.int64).itemsize
+            if input_len * itemsize > shm.size:
+                raise ValueError(
+                    f"prefill prompt ref exceeds shared memory, shm_index={shm_index}, "
+                    f"input_len={input_len}, size={shm.size}"
+                )
+            token_count = shm.size // itemsize
+            view = np.ndarray(shape=(token_count,), dtype=np.int64, buffer=shm.buf)
+            return view[:input_len].copy()
+        finally:
+            shm.close()

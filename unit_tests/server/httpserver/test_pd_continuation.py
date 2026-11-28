@@ -3,6 +3,7 @@ import pickle
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import numpy as np
 import pytest
 from tokenizers import Tokenizer, models, processors
 
@@ -12,6 +13,25 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.pd_io_struct import NodeRole
+from lightllm.utils.error_utils import InvalidRequestError
+
+
+def test_pd_decode_keeps_the_int64_prompt_array():
+    manager = object.__new__(HttpServerManager)
+    manager.pd_mode = NodeRole.D
+    manager.max_req_total_len = 20
+    manager.get_real_supported_max_req_total_len = lambda: 20
+    params = SamplingParams()
+    params.init(None, max_new_tokens=4)
+    prompt_ids = np.array([-(2 ** 63), 2 ** 40, 2 ** 63 - 1], dtype=np.int64)
+
+    encoded = asyncio.run(manager._encode(prompt_ids, None, params))
+    assert encoded is prompt_ids
+    assert asyncio.run(manager._check_and_repair_length(encoded, params)) is encoded
+    with pytest.raises(InvalidRequestError, match="must not be empty"):
+        asyncio.run(manager._check_and_repair_length(encoded[:0], params))
+    with pytest.raises(InvalidRequestError, match="one-dimensional int64"):
+        asyncio.run(manager._encode(encoded.reshape(1, 3), None, params))
 
 
 @pytest.mark.parametrize("multimodal", [False, True])

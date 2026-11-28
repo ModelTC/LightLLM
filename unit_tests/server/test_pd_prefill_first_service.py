@@ -11,13 +11,14 @@ import json
 import pickle
 
 import httpx
+import numpy as np
 import pytest
 import websockets
 from prometheus_client.parser import text_string_to_metric_families
 from websockets.exceptions import ConnectionClosed
 
 from lightllm.server.core.objs import FinishStatus
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillPromptIds
 from unit_tests.server.pd_master_test_utils import running_pd_master
 
 
@@ -29,7 +30,7 @@ class Segment:
     prefill_cache_len: int = 0
     decode_steps: tuple = None
     ready_kv_len: int = 0
-    token_before_kv_ready: bool = True
+    token_before_prompt_ids: bool = True
     hold_prefill: bool = False
     hold_upkv: bool = False
     busy: bool = False
@@ -265,7 +266,11 @@ class PrefillFirstPeers:
                 message=(ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, segment.prefill_error),
             )
             return
-        ready = PdPfPrefillKvReady(group_request_id=group_request_id, prompt_ids=list(prompt_ids))
+        reported = PdPfPrefillPromptIds(
+            group_request_id=group_request_id,
+            pd_master_node_id=master_id,
+            prompt_ids=np.asarray(prompt_ids, dtype=np.int64),
+        )
         token = _token_message(
             mode="prefill",
             master_id=master_id,
@@ -275,15 +280,18 @@ class PrefillFirstPeers:
             count=1,
             cache_len=segment.prefill_cache_len,
         )
-        kv_ready = (ObjType.PD_PF_PREFILL_KV_READY, ready)
-        if segment.token_before_kv_ready:
+        prompt_ids_notice = (ObjType.PD_PF_PREFILL_PROMPT_IDS, reported)
+        if segment.token_before_prompt_ids:
             self.prefill_sends.append(ObjType.TOKEN_PACKS)
             await self._send(websocket=websocket, message=token)
-            self.prefill_sends.append(ObjType.PD_PF_PREFILL_KV_READY)
-            await self._send(websocket=websocket, message=kv_ready)
+            self.prefill_sends.append(ObjType.PD_PF_PREFILL_PROMPT_IDS)
+            await self._send(websocket=websocket, message=prompt_ids_notice)
         else:
-            self.prefill_sends.append(ObjType.PD_PF_PREFILL_KV_READY)
-            await self._send(websocket=websocket, message=kv_ready)
+            self.prefill_sends.append(ObjType.PD_PF_PREFILL_PROMPT_IDS)
+            await self._send(websocket=websocket, message=prompt_ids_notice)
+            if params.pd_prefill_first:
+                # 最后一段上报之后，master 才会给 decode 占页。占页完成前先按住首 token。
+                await _wait_until(lambda: group_request_id in self.upkv_sent)
             self.prefill_sends.append(ObjType.TOKEN_PACKS)
             await self._send(websocket=websocket, message=token)
 
@@ -334,6 +342,8 @@ class PrefillFirstPeers:
                 message=(ObjType.PD_UPLOAD_GENERATE_ERROR, group_request_id, segment.decode_error),
             )
             return
+        if params.pd_prefill_first and int(params.max_new_tokens) > 1:
+            await _wait_until(lambda: any(item[1] == group_request_id for item in self.kv_ready))
         for text, finish, count in segment.steps():
             await self._send(
                 websocket=websocket,
@@ -535,7 +545,7 @@ def test_07_prefill_receives_the_original_prompt(prefill_first_service):
     _run(prefill_first_service, scenario)
 
 
-def test_08_decode_receives_prompt_ids_from_prefill_kv_ready(prefill_first_service):
+def test_08_decode_receives_prompt_ids_from_prefill_prompt_ids(prefill_first_service):
     async def scenario(master):
         async with _open(master, segments=[Segment(prompt_ids=[9, 8, 7])]) as (peers, client):
             response = await _generate(client=client, url=master.public_url)
@@ -763,7 +773,7 @@ def test_23_client_cancel_after_the_first_token_aborts_both_sides(prefill_first_
     _run(prefill_first_service, scenario)
 
 
-def test_24_cancel_before_prefill_kv_ready_does_not_open_decode(prefill_first_service):
+def test_24_cancel_before_prefill_prompt_ids_does_not_open_decode(prefill_first_service):
     async def scenario(master):
         async with _open(master, segments=[Segment(hold_prefill=True)]) as (peers, client):
             pending = asyncio.create_task(_generate(client=client, url=master.public_url))
@@ -849,10 +859,10 @@ def test_30_continuation_segment_is_marked_infer_high_priority(prefill_first_ser
 
 def test_31_kv_ready_arriving_before_the_prefill_token_still_completes(prefill_first_service):
     async def scenario(master):
-        async with _open(master, segments=[Segment(token_before_kv_ready=False)]) as (peers, client):
+        async with _open(master, segments=[Segment(token_before_prompt_ids=False)]) as (peers, client):
             response = await _generate(client=client, url=master.public_url)
             _assert_ok(response, ["hello world"])
-            assert peers.prefill_sends[:2] == [ObjType.PD_PF_PREFILL_KV_READY, ObjType.TOKEN_PACKS]
+            assert peers.prefill_sends[:2] == [ObjType.PD_PF_PREFILL_PROMPT_IDS, ObjType.TOKEN_PACKS]
 
     _run(prefill_first_service, scenario)
 
@@ -996,3 +1006,15 @@ async def _request_count(client, worker):
         if sample.name == "lightllm_request_count_total"
     ]
     return values[0] if values else 0.0
+
+
+def test_last_chunk_reserves_decode_pages_before_prefill_returns_its_token(tmp_path):
+    async def scenario(master):
+        async with _open(master, segments=[Segment(token_before_prompt_ids=False)]) as (peers, client):
+            response = await _generate(client=client, url=master.public_url)
+            _assert_ok(response, ["hello world"])
+            assert len(peers.decode_reqs) == len(peers.kv_ready) == 1
+            assert peers.prefill_reqs[0]["params"]["pd_prefill_first"]
+
+    with running_pd_master(tmp_path, extra_args=["--pd_prefill_first"]) as master:
+        _run(master, scenario)

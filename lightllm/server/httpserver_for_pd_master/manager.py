@@ -763,8 +763,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                                     req_status.event.set()
                             except:
                                 pass
-                    elif obj[0] == ObjType.PD_PF_PREFILL_KV_READY:
-                        self.record_pf_prefill_kv_ready(ready=obj[1])
+                    elif obj[0] == ObjType.PD_PF_PREFILL_PROMPT_IDS:
+                        self.record_pf_prefill_prompt_ids(reported=obj[1])
                     elif obj[0] == ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS:
                         _, group_req_id, prompt_ids = obj
                         try:
@@ -815,7 +815,7 @@ class ReqStatus:
         self.event = asyncio.Event()
         self.up_status_event = asyncio.Event()
         self.prefill_prompt_ids_event = asyncio.Event()
-        self.pf_prefill_kv_ready_event = asyncio.Event()
+        self.pf_prefill_prompt_ids_event = asyncio.Event()
         self.out_token_info_list: List[Tuple[int, str, dict, FinishStatus]] = []
         self.p_node: PD_Client_Obj = p_node
         self.d_node: PD_Client_Obj = d_node
@@ -834,12 +834,12 @@ class ReqStatus:
         async with self.lock:
             self.error_info = error_info
             self.is_server_busy = is_server_busy
-            # 请求可能正在等待 Prefill prompt ids、prefill KV 就绪、Decode KV 资源或输出 token，
+            # 请求可能正在等待旧的 Prefill prompt ids、prefill-first 的 prompt 上报、Decode KV 资源或输出 token，
             # 设置全部事件，让请求自己的执行循环立即醒来并抛出异常。
             self.event.set()
             self.up_status_event.set()
             self.prefill_prompt_ids_event.set()
-            self.pf_prefill_kv_ready_event.set()
+            self.pf_prefill_prompt_ids_event.set()
 
     def raise_if_error(self):
         if self.error_info is not None:
