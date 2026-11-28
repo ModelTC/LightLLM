@@ -205,7 +205,7 @@ def test_response_boundaries(pd_service, case):
         elif case == "large_ids":
             segment.prompt_ids = [1, 2 ** 40, 2 ** 63 - 1]
         elif case == "ready_before_token":
-            segment.token_before_kv_ready = False
+            segment.token_before_prompt_ids = False
         elif case in ("error_terminal_index_one", "abort_terminal_index_one"):
             finish = FinishStatus.FINISHED_ERROR if case.startswith("error") else FinishStatus.FINISHED_ABORTED
             segment.decode_steps = (("hello", FinishStatus.NO_FINISH, 1), ("", finish, 1))

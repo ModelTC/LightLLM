@@ -49,15 +49,15 @@ class ObjType(enum.Enum):
     PD_UPLOAD_KV_STATUS = 9  # Decode 推理进程经 pd_report 上报 KV 握手信息。
     # 下面三条只用于 PD 分离的 Prefill 先推理模式。PF 是 PREFILL_FIRST 的简写。
     PD_PF_PREFILL_REQ = 10  # PD 分离的 Prefill 先推理模式：Master 让 prefill 先算，不等 decode 端点。
-    PD_PF_PREFILL_KV_READY = 11  # Prefill 上报 prompt ids，允许 decode 占页。最后一段被调度时就会上报，此时仍在计算。
+    PD_PF_PREFILL_PROMPT_IDS = 11  # 最后一段被调度时 Prefill 上报 prompt ids。Master 据此把请求下发给 decode 占页，此时仍在计算。
     PD_PF_DECODE_KV_READY = 12  # Decode 的 KV 页已备好，master 把端点交给 prefill，可以开始传输。
 
 
 @dataclass
-class PdPfPrefillKvReadyRef:
+class PdPfPrefillPromptIdsRef:
     """推理进程发给本机 pd_report 的最后一段通知。
 
-    只带请求槽位。prompt 留在共享内存里，由 pd_report 读出后再上报给 Master。
+    只带请求槽位。prompt 留在共享内存里，由 pd_report 读出后再交给 Master 下发 decode。
     """
 
     group_request_id: int
@@ -67,17 +67,17 @@ class PdPfPrefillKvReadyRef:
 
     def __repr__(self) -> str:
         return (
-            f"PdPfPrefillKvReadyRef(group_request_id={self.group_request_id}, "
+            f"PdPfPrefillPromptIdsRef(group_request_id={self.group_request_id}, "
             f"shm_index={self.shm_index}, input_len={self.input_len})"
         )
 
 
 @dataclass(eq=False)
-class PdPfPrefillKvReady:
-    """PD_PF_PREFILL_KV_READY 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。
+class PdPfPrefillPromptIds:
+    """PD_PF_PREFILL_PROMPT_IDS 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。
 
-    本机 pd_report 根据 pd_master_node_id 选择目标 PD Master。Master 将 prompt 交给 decode。
-    首 token 走 token 流，并在最后一块传输 done 上带给 decode。页号留在 prefill 进程里。
+    本机 pd_report 根据 pd_master_node_id 选择目标 PD Master。Master 把 prompt 下发给 decode 占页。
+    发出时最后一段仍在计算。首 token 走 token 流，并在最后一块传输 done 上带给 decode。页号留在 prefill 进程里。
     """
 
     group_request_id: int
@@ -85,7 +85,7 @@ class PdPfPrefillKvReady:
     prompt_ids: np.ndarray
 
     def __repr__(self) -> str:
-        return f"PdPfPrefillKvReady(group_request_id={self.group_request_id}, prompt_len={len(self.prompt_ids)})"
+        return f"PdPfPrefillPromptIds(group_request_id={self.group_request_id}, prompt_len={len(self.prompt_ids)})"
 
 
 @dataclass

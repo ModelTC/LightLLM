@@ -65,7 +65,7 @@ async def register_and_keep_alive(websocket: WebSocket):
 
 @router.websocket("/pd_report")
 async def receive_pd_report(websocket: WebSocket):
-    """pd_report 进程上报 KV 握手或 prefill 最后一段就绪。这条连接不注册节点，也不下发请求。"""
+    """pd_report 进程上报 KV 握手、prefill 最后一段的 prompt ids，或读槽失败时的生成错误。这条连接不注册节点，也不下发请求。"""
     from .api_http import g_objs
 
     await websocket.accept()
@@ -81,8 +81,11 @@ async def receive_pd_report(websocket: WebSocket):
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_UPLOAD_KV_STATUS:
                 await g_objs.httpserver_manager.update_req_status(obj[1])
                 continue
-            if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_PF_PREFILL_KV_READY:
-                g_objs.httpserver_manager.record_pf_prefill_kv_ready(ready=obj[1])
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_PF_PREFILL_PROMPT_IDS:
+                g_objs.httpserver_manager.record_pf_prefill_prompt_ids(reported=obj[1])
+                continue
+            if isinstance(obj, tuple) and obj and obj[0] == ObjType.PD_UPLOAD_GENERATE_ERROR:
+                await g_objs.httpserver_manager.put_to_handle_queue(obj=obj)
                 continue
             logger.error(f"pd report {(client_ip, client_port)} dropped unexpected object {obj}")
     except WebSocketDisconnect as exc:

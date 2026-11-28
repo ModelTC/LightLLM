@@ -12,8 +12,8 @@ from lightllm.server.pd_io_struct import (
     ObjType,
     PDDecodeNodeInfo,
     PDUpKVStatus,
-    PdPfPrefillKvReady,
-    PdPfPrefillKvReadyRef,
+    PdPfPrefillPromptIds,
+    PdPfPrefillPromptIdsRef,
 )
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.pd_report.manager import PdReportManager
@@ -123,7 +123,9 @@ def test_local_report_ipc_carries_prefill_prompt_array_and_decode_status(tmp_pat
         push = ReportIpc.Push()
         pull.bind()
         try:
-            notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=1_000_000)
+            notice = PdPfPrefillPromptIdsRef(
+                group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=1_000_000
+            )
             decode_status = PDUpKVStatus(8, 200, b"metadata")
             push.send(notice)
             push.send(decode_status)
@@ -166,18 +168,18 @@ def test_pd_report_reads_prefill_prompt_from_shared_memory(caplog, monkeypatch):
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
     manager._read_prefill_prompt_ids = lambda shm_index, input_len: prompt_ids[:input_len].copy()
     manager._queues[100] = asyncio.Queue()
-    notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
+    notice = PdPfPrefillPromptIdsRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
 
     _deliver(manager, [notice])
 
     kind, received = manager._queues[100].get_nowait()
-    assert kind == ObjType.PD_PF_PREFILL_KV_READY
-    assert isinstance(received, PdPfPrefillKvReady)
+    assert kind == ObjType.PD_PF_PREFILL_PROMPT_IDS
+    assert isinstance(received, PdPfPrefillPromptIds)
     assert (received.group_request_id, received.pd_master_node_id) == (9, 100)
     np.testing.assert_array_equal(received.prompt_ids, prompt_ids)
     assert received.prompt_ids is not prompt_ids
     log = caplog.text
-    assert "pd report queued PD_PF_PREFILL_KV_READY for master 100" in log
+    assert "pd report queued PD_PF_PREFILL_PROMPT_IDS for master 100" in log
     assert "shm_index=3, input_len=2" in log
     assert "9876543" not in log
     assert "8765432" not in log
@@ -194,7 +196,7 @@ def test_pd_report_reports_prefill_prompt_read_failure_to_master():
 
     manager._read_prefill_prompt_ids = _fail
     manager._queues[100] = asyncio.Queue()
-    notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
+    notice = PdPfPrefillPromptIdsRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
 
     _deliver(manager, [notice])
 

@@ -245,11 +245,11 @@ def test_only_selected_final_prefill_chunks_signal_decode_allocation(monkeypatch
     reqs[1].cur_kv_len = 6
     for req in reqs:
         ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
-    assert [hasattr(req, "pd_prefill_kv_ready_reported") for req in reqs] == [False, True, False]
+    assert [hasattr(req, "pd_prefill_prompt_ids_reported") for req in reqs] == [False, True, False]
 
     backend.disable_chunked_prefill = True
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=reqs[0])
-    assert hasattr(reqs[0], "pd_prefill_kv_ready_reported")
+    assert hasattr(reqs[0], "pd_prefill_prompt_ids_reported")
 
 
 def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
@@ -267,14 +267,14 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
 
-    (report,) = backend.pd_prefill_kv_ready_push.sent
+    (report,) = backend.pd_prefill_prompt_ids_push.sent
     assert (report.group_request_id, report.pd_master_node_id, report.shm_index, report.input_len) == (
         9,
         100,
         req.shm_req.index_in_shm_mem,
         req.shm_req.input_len,
     )
-    assert hasattr(req, "pd_prefill_kv_ready_reported")
+    assert hasattr(req, "pd_prefill_prompt_ids_reported")
 
     backend.is_master_in_dp = False
     other = _make_prefill_req(req_idx=2, token_num=8)
@@ -282,8 +282,8 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     other.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
     other.get_chuncked_input_token_len = lambda: 8
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=other)
-    assert len(backend.pd_prefill_kv_ready_push.sent) == 1
-    assert not hasattr(other, "pd_prefill_kv_ready_reported")
+    assert len(backend.pd_prefill_prompt_ids_push.sent) == 1
+    assert not hasattr(other, "pd_prefill_prompt_ids_reported")
 
 
 def test_decode_node_does_not_signal_last_chunk():
@@ -291,4 +291,4 @@ def test_decode_node_does_not_signal_last_chunk():
     req = _make_prefill_req(0, 8)
     req.shm_req = SimpleNamespace(input_len=8, sample_params=SimpleNamespace(pd_prefill_first=True))
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
-    assert not hasattr(req, "pd_prefill_kv_ready_reported")
+    assert not hasattr(req, "pd_prefill_prompt_ids_reported")

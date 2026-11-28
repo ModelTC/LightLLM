@@ -23,7 +23,7 @@ from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
-from lightllm.server.pd_io_struct import PdPfPrefillKvReadyRef
+from lightllm.server.pd_io_struct import PdPfPrefillPromptIdsRef
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -914,22 +914,22 @@ class ModeBackend:
             scheduled_len = req_obj.get_chuncked_input_token_len()
         if scheduled_len != req_obj.shm_req.input_len:
             return
-        if not self.is_master_in_dp or hasattr(req_obj, "pd_prefill_kv_ready_reported"):
+        if not self.is_master_in_dp or hasattr(req_obj, "pd_prefill_prompt_ids_reported"):
             return
-        req_obj.pd_prefill_kv_ready_reported = True
-        if not hasattr(self, "pd_prefill_kv_ready_push"):
-            setattr(self, "pd_prefill_kv_ready_push", ReportIpc.Push())
-        # 槽位还被本请求占用。pd_report 收到后立刻从共享内存拷出 prompt，再上报给 Master。
-        ready = PdPfPrefillKvReadyRef(
+        req_obj.pd_prefill_prompt_ids_reported = True
+        if not hasattr(self, "pd_prefill_prompt_ids_push"):
+            setattr(self, "pd_prefill_prompt_ids_push", ReportIpc.Push())
+        # 槽位还被本请求占用。pd_report 收到后立刻从共享内存拷出 prompt，再交给 Master 下发 decode。
+        reported = PdPfPrefillPromptIdsRef(
             group_request_id=int(req_obj.shm_req.sample_params.group_request_id),
             pd_master_node_id=int(req_obj.sampling_param.pd_master_node_id),
             shm_index=int(req_obj.shm_req.index_in_shm_mem),
             input_len=int(req_obj.shm_req.input_len),
         )
-        self.pd_prefill_kv_ready_push.send(message=ready)
+        self.pd_prefill_prompt_ids_push.send(message=reported)
         self.logger.debug(
-            f"prefill-first stage=report-prefill-kv-ready, group_request_id={ready.group_request_id}, "
-            f"shm_index={ready.shm_index}, input_len={ready.input_len}"
+            f"prefill-first stage=report-prefill-prompt-ids, group_request_id={reported.group_request_id}, "
+            f"shm_index={reported.shm_index}, input_len={reported.input_len}"
         )
         return
 

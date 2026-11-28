@@ -13,7 +13,7 @@ from fastapi import Request
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PD_Client_Obj, PdPfPrefillPromptIds
 from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
@@ -70,7 +70,7 @@ class HttpPdPrefillFirstManagerHelper:
 
         try:
             # 1. 发给 prefill。max_new_tokens 临时改成 1，只采样首 token，不等 decode 端点。
-            # 等 PD_PF_PREFILL_KV_READY：最后一段被调度时上报，forward 还没结束。
+            # 等 PD_PF_PREFILL_PROMPT_IDS：最后一段被调度时上报 prompt ids，Master 据此下发 decode。forward 还没结束。
             # 资源等待和后面的 upkv 用同一档；计算另给 180 秒。
             # Prefill 自己的资源到点会上报繁忙并叫醒这次等待，这里是它不再上报时的截止。
             resource_wait_seconds = sampling_params.pd_node_resource_wait_timeout_seconds
@@ -81,7 +81,7 @@ class HttpPdPrefillFirstManagerHelper:
             prefill_compute_seconds = 180
             prefill_ready_timeout_seconds = resource_budget_seconds + prefill_compute_seconds
             logger.info(
-                f"prefill-first waiting pf-prefill-kv-ready, group_request_id={group_request_id}, "
+                f"prefill-first waiting pf-prefill-prompt-ids, group_request_id={group_request_id}, "
                 f"resource_wait_seconds={resource_wait_seconds}, resource_budget_seconds={resource_budget_seconds}, "
                 f"prefill_compute_seconds={prefill_compute_seconds}, timeout_seconds={prefill_ready_timeout_seconds}. "
                 f"negative resource_wait_seconds uses a 180s resource budget; otherwise two resource-wait budgets "
@@ -93,16 +93,16 @@ class HttpPdPrefillFirstManagerHelper:
             sampling_params.max_new_tokens = saved_max_new_tokens
             try:
                 await self._wait_for_event_or_disconnect(
-                    event=req_status.pf_prefill_kv_ready_event,
+                    event=req_status.pf_prefill_prompt_ids_event,
                     request=request,
                     timeout=prefill_ready_timeout_seconds,
                     group_request_id=group_request_id,
                     origin_request_id=origin_request_id,
-                    stage="pf-prefill-kv-ready",
+                    stage="pf-prefill-prompt-ids",
                 )
             except ServerBusyError:
                 logger.warning(
-                    f"group_request_id: {group_request_id} wait pf-prefill-kv-ready time out, server is busy now."
+                    f"group_request_id: {group_request_id} wait pf-prefill-prompt-ids time out, server is busy now."
                 )
                 raise
             req_status.raise_if_error()
@@ -126,8 +126,8 @@ class HttpPdPrefillFirstManagerHelper:
                 req_status.d_node = d_node
                 req_status.d_websocket = d_websocket
 
-                ready: PdPfPrefillKvReady = req_status.pf_prefill_kv_ready_event.ready
-                decode_payload = pickle.dumps((ObjType.REQ, (ready.prompt_ids, sampling_params, MultimodalParams())))
+                reported: PdPfPrefillPromptIds = req_status.pf_prefill_prompt_ids_event.reported
+                decode_payload = pickle.dumps((ObjType.REQ, (reported.prompt_ids, sampling_params, MultimodalParams())))
                 self._reject_oversized_control_message(payload=decode_payload, group_request_id=group_request_id)
                 await d_websocket.send_bytes(decode_payload)
 
@@ -244,17 +244,17 @@ class HttpPdPrefillFirstManagerHelper:
                 await self.abort(group_request_id=group_request_id, p_node=p_node, d_node=req_status.d_node)
         return
 
-    # 记下 prefill KV 就绪上报并唤醒等待。请求还要等 decode KV 就绪，这里不结束。
-    def record_pf_prefill_kv_ready(
+    # 记下 prefill 上报的 prompt ids 并唤醒等待。Master 随后把请求下发给 decode。这里不结束请求。
+    def record_pf_prefill_prompt_ids(
         self: HttpServerManagerForPDMaster,
-        ready: PdPfPrefillKvReady,
+        reported: PdPfPrefillPromptIds,
     ) -> None:
-        req_status = self.req_id_to_out_inf.get(ready.group_request_id)
+        req_status = self.req_id_to_out_inf.get(reported.group_request_id)
         if req_status is None:
-            logger.error(f"PD_PF_PREFILL_KV_READY finds no request, group_request_id={ready.group_request_id}")
+            logger.error(f"PD_PF_PREFILL_PROMPT_IDS finds no request, group_request_id={reported.group_request_id}")
             return
-        req_status.pf_prefill_kv_ready_event.ready = ready
-        req_status.pf_prefill_kv_ready_event.set()
+        req_status.pf_prefill_prompt_ids_event.reported = reported
+        req_status.pf_prefill_prompt_ids_event.set()
         return
 
     # 等到 prefill 的那一个首 token，并改写结束状态。连接断开、请求失败或不能续跑时抛异常。

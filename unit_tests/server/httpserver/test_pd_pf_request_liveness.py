@@ -17,7 +17,7 @@ from lightllm.server.httpserver.pd_pf_prefill_node import (
 )
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, ReqStatus
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import ObjType, PD_Client_Obj, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillPromptIds
 from lightllm.utils.error_utils import ClientDisconnected, RequestStopped, ServerBusyError
 
 
@@ -46,7 +46,7 @@ class _Session:
         self.params.group_request_id = GROUP_ID
         self.tokens = tokens
         self.hold_handshake = False
-        self.hold_prefill_ready = False
+        self.hold_prefill_prompt_ids = False
         self.failed_sends = set()
         self.messages = {"p": [], "d": []}
         self.request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
@@ -92,13 +92,13 @@ class _Session:
         message = self._record("p", payload)
         if message[0] == ObjType.PD_PF_PREFILL_REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
-            self.status.pf_prefill_kv_ready_event.ready = PdPfPrefillKvReady(
+            self.status.pf_prefill_prompt_ids_event.reported = PdPfPrefillPromptIds(
                 group_request_id=GROUP_ID,
                 pd_master_node_id=self.manager.args.pd_node_id,
                 prompt_ids=np.array([1, 2], dtype=np.int64),
             )
-            if not self.hold_prefill_ready:
-                self.status.pf_prefill_kv_ready_event.set()
+            if not self.hold_prefill_prompt_ids:
+                self.status.pf_prefill_prompt_ids_event.set()
             self.status.out_token_info_list.append(
                 _token("hello", 1, FinishStatus.FINISHED_LENGTH, node_mode="prefill")
             )
@@ -106,7 +106,7 @@ class _Session:
         elif message[0] == ObjType.REQ:
             self.status = self.manager.req_id_to_out_inf[GROUP_ID]
             self.status.prefill_prompt_ids_event.prompt_ids = [1, 2]
-            if not self.hold_prefill_ready:
+            if not self.hold_prefill_prompt_ids:
                 self.status.prefill_prompt_ids_event.set()
 
     async def _send_decode(self, payload):
@@ -210,9 +210,9 @@ def test_stop_during_handshake_aborts_only_current_choice(prefill_first, wrap_de
     async def run():
         session = _Session(prefill_first=prefill_first, wrap_default=wrap_default)
         session.hold_handshake = True
-        session.hold_prefill_ready = stage == "prefill"
+        session.hold_prefill_prompt_ids = stage == "prefill"
         target_stage = (
-            {"prefill": "pf-prefill-kv-ready", "decode": "prefill-first-decode"}[stage] if prefill_first else stage
+            {"prefill": "pf-prefill-prompt-ids", "decode": "prefill-first-decode"}[stage] if prefill_first else stage
         )
         waiting = asyncio.Event()
         handshake_event = None
@@ -260,7 +260,7 @@ def test_stop_during_handshake_aborts_only_current_choice(prefill_first, wrap_de
     asyncio.run(asyncio.wait_for(run(), timeout=3))
 
 
-@pytest.mark.parametrize("stage", ["prefill", "decode", "pf-prefill-kv-ready", "prefill-first-decode"])
+@pytest.mark.parametrize("stage", ["prefill", "decode", "pf-prefill-prompt-ids", "prefill-first-decode"])
 @pytest.mark.parametrize("ready", [False, True])
 def test_wait_raises_request_stopped_for_original_id(stage, ready):
     async def run():
@@ -435,7 +435,7 @@ def test_decode_node_info_is_written_when_the_notification_arrives():
     assert missing is False
 
 
-def test_session_does_not_poll_for_prefill_kv_ready():
+def test_session_does_not_poll_for_prefill_prompt_ids():
     async def run():
         params = SamplingParams()
         params.init(None, max_new_tokens=1)

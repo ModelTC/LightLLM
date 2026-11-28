@@ -18,8 +18,8 @@ from lightllm.server.core.objs import StartArgs
 from lightllm.server.pd_io_struct import (
     ObjType,
     PDUpKVStatus,
-    PdPfPrefillKvReady,
-    PdPfPrefillKvReadyRef,
+    PdPfPrefillPromptIds,
+    PdPfPrefillPromptIdsRef,
     PD_Master_Obj,
 )
 from lightllm.utils.shm_utils import create_or_link_shm
@@ -96,7 +96,7 @@ class PdReportManager:
             if isinstance(status, PDUpKVStatus):
                 master_id = status.pd_master_node_id
                 item = (ObjType.PD_UPLOAD_KV_STATUS, status)
-            elif isinstance(status, PdPfPrefillKvReadyRef):
+            elif isinstance(status, PdPfPrefillPromptIdsRef):
                 try:
                     prompt_ids = self._read_prefill_prompt_ids(shm_index=status.shm_index, input_len=status.input_len)
                 except BaseException as exc:
@@ -114,16 +114,16 @@ class PdReportManager:
                         f"{type(exc).__name__}: {exc}",
                     )
                 else:
-                    ready = PdPfPrefillKvReady(
+                    reported = PdPfPrefillPromptIds(
                         group_request_id=status.group_request_id,
                         pd_master_node_id=status.pd_master_node_id,
                         prompt_ids=prompt_ids,
                     )
-                    master_id = ready.pd_master_node_id
-                    item = (ObjType.PD_PF_PREFILL_KV_READY, ready)
-            elif isinstance(status, PdPfPrefillKvReady):
+                    master_id = reported.pd_master_node_id
+                    item = (ObjType.PD_PF_PREFILL_PROMPT_IDS, reported)
+            elif isinstance(status, PdPfPrefillPromptIds):
                 master_id = status.pd_master_node_id
-                item = (ObjType.PD_PF_PREFILL_KV_READY, status)
+                item = (ObjType.PD_PF_PREFILL_PROMPT_IDS, status)
             else:
                 logger.error(f"pd report dropped malformed local message {status!r}")
                 os._exit(1)
