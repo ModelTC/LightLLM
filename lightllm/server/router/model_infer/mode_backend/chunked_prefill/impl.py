@@ -93,7 +93,9 @@ class ChunkedPrefillBackend(ModeBackend):
                     event_pack.notify_post_handle_and_wait_pre_post_handle()
                     event_pack.notify_forward_and_wait_post_handle()
                     event_pack.notify_pre_post_handle()
-                    time.sleep(0.02)
+                    # 没有请求时少占 CPU；还有请求时短睡，避免挡住下一轮调度。
+                    sleep_seconds = 0.02 if len(g_infer_context.infer_req_ids) == 0 else 0.001
+                    time.sleep(sleep_seconds)
                     continue
 
         except BaseException as e:
