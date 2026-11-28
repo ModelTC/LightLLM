@@ -224,8 +224,7 @@ def _report_backend(run_mode: str, is_master_in_dp: bool, disable_chunked_prefil
 
 
 def _attach_prompt(req, group_request_id: int, prompt_ids: list, pd_master_node_id: int) -> None:
-    prompt_buffer = np.array(prompt_ids, dtype=np.int64)
-    req.shm_req.get_prompt_ids_numpy = lambda: prompt_buffer
+    req.shm_req.index_in_shm_mem = group_request_id
     req.shm_req.sample_params.group_request_id = group_request_id
     req.sampling_param = SimpleNamespace(pd_master_node_id=pd_master_node_id)
 
@@ -269,8 +268,12 @@ def test_last_chunk_is_reported_once_by_dp_rank0(monkeypatch):
     ModeBackend._report_prefill_first_last_chunk(backend, req_obj=req)
 
     (report,) = backend.pd_prefill_kv_ready_push.sent
-    assert (report.group_request_id, report.pd_master_node_id) == (9, 100)
-    assert report.prompt_ids is req.shm_req.get_prompt_ids_numpy()
+    assert (report.group_request_id, report.pd_master_node_id, report.shm_index, report.input_len) == (
+        9,
+        100,
+        req.shm_req.index_in_shm_mem,
+        req.shm_req.input_len,
+    )
     assert hasattr(req, "pd_prefill_kv_ready_reported")
 
     backend.is_master_in_dp = False

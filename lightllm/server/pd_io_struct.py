@@ -53,6 +53,25 @@ class ObjType(enum.Enum):
     PD_PF_DECODE_KV_READY = 12  # Decode 的 KV 页已备好，master 把端点交给 prefill，可以开始传输。
 
 
+@dataclass
+class PdPfPrefillKvReadyRef:
+    """推理进程发给本机 pd_report 的最后一段通知。
+
+    只带请求槽位。prompt 留在共享内存里，由 pd_report 读出后再上报给 Master。
+    """
+
+    group_request_id: int
+    pd_master_node_id: int
+    shm_index: int
+    input_len: int
+
+    def __repr__(self) -> str:
+        return (
+            f"PdPfPrefillKvReadyRef(group_request_id={self.group_request_id}, "
+            f"shm_index={self.shm_index}, input_len={self.input_len})"
+        )
+
+
 @dataclass(eq=False)
 class PdPfPrefillKvReady:
     """PD_PF_PREFILL_KV_READY 的载荷。PF 是 PREFILL_FIRST，只用于 PD 分离的 Prefill 先推理模式。

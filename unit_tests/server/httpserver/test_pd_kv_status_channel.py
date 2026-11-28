@@ -8,7 +8,13 @@ from unittest.mock import AsyncMock
 import numpy as np
 
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
-from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus, PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import (
+    ObjType,
+    PDDecodeNodeInfo,
+    PDUpKVStatus,
+    PdPfPrefillKvReady,
+    PdPfPrefillKvReadyRef,
+)
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.pd_report.manager import PdReportManager
 from lightllm.server.pd_report.manager import logger as pd_report_logger
@@ -117,19 +123,13 @@ def test_local_report_ipc_carries_prefill_prompt_array_and_decode_status(tmp_pat
         push = ReportIpc.Push()
         pull.bind()
         try:
-            prompt_ids = np.array([-(2 ** 63), 2 ** 40, 2 ** 63 - 1], dtype=np.int64)
-            expected = prompt_ids.copy()
-            ready = PdPfPrefillKvReady(group_request_id=9, pd_master_node_id=100, prompt_ids=prompt_ids)
+            notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=1_000_000)
             decode_status = PDUpKVStatus(8, 200, b"metadata")
-            push.send(ready)
-            prompt_ids.fill(0)
+            push.send(notice)
             push.send(decode_status)
 
             received = await pull.recv()
-            assert isinstance(received, PdPfPrefillKvReady)
-            assert (received.group_request_id, received.pd_master_node_id) == (9, 100)
-            assert received.prompt_ids.dtype == np.int64
-            np.testing.assert_array_equal(received.prompt_ids, expected)
+            assert received == notice
             assert await pull.recv() == decode_status
         finally:
             push.close()
@@ -138,25 +138,70 @@ def test_local_report_ipc_carries_prefill_prompt_array_and_decode_status(tmp_pat
     asyncio.run(asyncio.wait_for(run(), timeout=5))
 
 
-def test_pd_report_routes_prefill_kv_ready_by_master_id(caplog, monkeypatch):
+def test_read_prefill_prompt_ids_copies_the_shared_prefix(monkeypatch):
+    from lightllm.utils.envs_utils import get_unique_server_name
+    from lightllm.utils.shm_utils import create_or_link_shm
+
+    monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "pdreporttest_0")
+    get_unique_server_name.cache_clear()
+    tokens = np.array([11, 22, 33, 44], dtype=np.int64)
+    shm = create_or_link_shm(name="shm_prompts_4", expected_size=int(tokens.nbytes), force_mode="create")
+    manager = PdReportManager(args=SimpleNamespace(), pull=None)
+    try:
+        np.ndarray(shape=(4,), dtype=np.int64, buffer=shm.buf)[:] = tokens
+        copied = manager._read_prefill_prompt_ids(shm_index=4, input_len=3)
+        shm_view = np.ndarray(shape=(4,), dtype=np.int64, buffer=shm.buf)
+        shm_view[:] = 0
+        np.testing.assert_array_equal(copied, np.array([11, 22, 33], dtype=np.int64))
+    finally:
+        shm.close()
+        shm.unlink()
+        get_unique_server_name.cache_clear()
+
+
+def test_pd_report_reads_prefill_prompt_from_shared_memory(caplog, monkeypatch):
     monkeypatch.setattr(pd_report_logger, "handlers", [caplog.handler])
     caplog.set_level("INFO", logger=pd_report_logger.name)
+    prompt_ids = np.array([9876543, 8765432], dtype=np.int64)
     manager = PdReportManager(args=SimpleNamespace(), pull=None)
+    manager._read_prefill_prompt_ids = lambda shm_index, input_len: prompt_ids[:input_len].copy()
     manager._queues[100] = asyncio.Queue()
-    ready = PdPfPrefillKvReady(
-        group_request_id=9, pd_master_node_id=100, prompt_ids=np.array([9876543, 8765432], dtype=np.int64)
-    )
+    notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
 
-    _deliver(manager, [ready])
+    _deliver(manager, [notice])
 
     kind, received = manager._queues[100].get_nowait()
     assert kind == ObjType.PD_PF_PREFILL_KV_READY
-    assert received is ready
+    assert isinstance(received, PdPfPrefillKvReady)
+    assert (received.group_request_id, received.pd_master_node_id) == (9, 100)
+    np.testing.assert_array_equal(received.prompt_ids, prompt_ids)
+    assert received.prompt_ids is not prompt_ids
     log = caplog.text
     assert "pd report queued PD_PF_PREFILL_KV_READY for master 100" in log
-    assert "group_request_id=9, prompt_len=2" in log
+    assert "shm_index=3, input_len=2" in log
     assert "9876543" not in log
     assert "8765432" not in log
+
+
+def test_pd_report_reports_prefill_prompt_read_failure_to_master():
+    class _FatalRead(BaseException):
+        pass
+
+    manager = PdReportManager(args=SimpleNamespace(), pull=None)
+
+    def _fail(shm_index: int, input_len: int) -> np.ndarray:
+        raise _FatalRead(f"shm gone, shm_index={shm_index}, input_len={input_len}")
+
+    manager._read_prefill_prompt_ids = _fail
+    manager._queues[100] = asyncio.Queue()
+    notice = PdPfPrefillKvReadyRef(group_request_id=9, pd_master_node_id=100, shm_index=3, input_len=2)
+
+    _deliver(manager, [notice])
+
+    kind, group_request_id, error_info = manager._queues[100].get_nowait()
+    assert kind == ObjType.PD_UPLOAD_GENERATE_ERROR
+    assert group_request_id == 9
+    assert error_info == "_FatalRead: shm gone, shm_index=3, input_len=2"
 
 
 def test_pd_report_routes_the_handshake_by_master_id():

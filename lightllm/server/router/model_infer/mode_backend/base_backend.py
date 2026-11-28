@@ -23,7 +23,7 @@ from lightllm.utils.dist_utils import init_distributed_env
 from lightllm.server.core.objs import ShmReqManager, StartArgs
 from lightllm.server.core.objs.io_objs import AbortedReqCmd, PdPfDecodeKvReadyCmd
 from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
-from lightllm.server.pd_io_struct import PdPfPrefillKvReady
+from lightllm.server.pd_io_struct import PdPfPrefillKvReadyRef
 from lightllm.server.pd_report.ipc import ReportIpc
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
@@ -919,16 +919,17 @@ class ModeBackend:
         req_obj.pd_prefill_kv_ready_reported = True
         if not hasattr(self, "pd_prefill_kv_ready_push"):
             setattr(self, "pd_prefill_kv_ready_push", ReportIpc.Push())
-        # ReportIpc pickles the view synchronously into its own bytes before the request slot can be reused.
-        ready = PdPfPrefillKvReady(
+        # 槽位还被本请求占用。pd_report 收到后立刻从共享内存拷出 prompt，再上报给 Master。
+        ready = PdPfPrefillKvReadyRef(
             group_request_id=int(req_obj.shm_req.sample_params.group_request_id),
-            prompt_ids=req_obj.shm_req.get_prompt_ids_numpy(),
             pd_master_node_id=int(req_obj.sampling_param.pd_master_node_id),
+            shm_index=int(req_obj.shm_req.index_in_shm_mem),
+            input_len=int(req_obj.shm_req.input_len),
         )
         self.pd_prefill_kv_ready_push.send(message=ready)
         self.logger.debug(
             f"prefill-first stage=report-prefill-kv-ready, group_request_id={ready.group_request_id}, "
-            f"prompt_len={len(ready.prompt_ids)}"
+            f"shm_index={ready.shm_index}, input_len={ready.input_len}"
         )
         return
 
