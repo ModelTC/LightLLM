@@ -58,7 +58,8 @@ def test_marlin_repacking_merged_awq_projection(dtype, height, widths, tokens):
         (95, 8),
         (96, 8),
         (96, 32),
-        (97, 32),
+        (112, 32),
+        (113, 32),
         (128, 8),
         (128, 32),
     ],
@@ -112,7 +113,7 @@ def test_moe_marlin_awq_reduction(dtype, tokens, experts):
             graph.replay()
             assert torch.equal(replayed, actual)
 
-    if tokens in (1, 8, 9, 16, 48, 64, 96, 97):
+    if tokens in (1, 8, 9, 16, 48, 64, 96, 112, 113):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             replayed = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)

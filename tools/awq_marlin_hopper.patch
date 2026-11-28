@@ -78,7 +78,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh 
      host::RuntimeCheck(prob_k % thread_k == 0, "prob_k = ", prob_k, " is not divisible by thread_k = ", thread_k);
 +  } else if (
 +      m_block_size_8 && num_experts == 32 && q_type == host::kU4 && group_size == 128 && !is_ep &&
-+      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 192 &&
++      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 224 &&
 +      ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
 +      is_valid_config(
 +          {128, 64, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
