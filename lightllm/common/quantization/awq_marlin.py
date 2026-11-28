@@ -143,6 +143,8 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
     short_batch = topk == 2 and ((experts == 8 and tokens <= 16) or (experts == 32 and tokens <= 144))
     if hidden == 2048 and intermediate == 768 and (single_token or short_batch):
         block = 8
+    if topk == 2 and experts == 32 and 160 <= tokens <= 192 and hidden == 2048 and intermediate == 768:
+        block = 16
     if topk == 2 and experts == 8 and 128 <= tokens <= 256 and hidden == 2048 and intermediate == 768:
         block = 32
     routes = route_ids.numel()

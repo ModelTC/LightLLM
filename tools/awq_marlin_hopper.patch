@@ -44,17 +44,22 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h b/pytho
 diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
 --- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
 +++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
-@@ -390,6 +390,9 @@
+@@ -390,6 +390,14 @@
    int k_tiles = prob_k / 16 / thread_k_blocks;
    int n_tiles = prob_n / 16 / thread_n_blocks;
    int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
++  constexpr bool awq_m16 =
++      thread_m_blocks == 1 && !m_block_size_8 && thread_n_blocks == 8 && thread_k_blocks == 4 &&
++      w_type == host::kU4 && group_blocks == 8 && !is_zp_float;
 +  if constexpr (m_block_size_8) {
 +    if (thread_n_blocks == 4 || prob_m * top_k <= 32) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++  } else if constexpr (awq_m16) {
++    iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
 +  }
 
    if constexpr (!has_act_order && group_blocks != -1) {
      if (group_blocks >= thread_k_blocks) {
-@@ -403,3 +406,11 @@
+@@ -403,3 +411,11 @@
 -  int slice_row = (iters * blockIdx.x) % k_tiles;
 -  int slice_col_par = (iters * blockIdx.x) / k_tiles;
 +  const bool balance_ctas = m_block_size_8 && thread_n_blocks == 4 && prob_m * top_k > 224;
@@ -68,7 +73,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
 +  int slice_row = balance_ctas ? 0 : (iters * blockIdx.x) % k_tiles;
 +  int slice_col_par = balance_ctas ? first_tile : (iters * blockIdx.x) / k_tiles;
    int slice_col = slice_col_par;
-@@ -556,2 +567,13 @@
+@@ -556,2 +572,13 @@
    auto init_slice = [&](bool first_init = false) {
 +    if (balance_ctas) {
 +      slice_iters = slice_col_par < first_tile + cta_tiles ? k_tiles : 0;
@@ -82,6 +87,16 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
 +      return;
 +    }
      slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
+@@ -1701,3 +1728,4 @@
+                           : (pipe + (stage_group_id + 1) * stages - 1);
++            if constexpr (awq_m16) __syncthreads();
+             fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages, idx);
+             pipe++;
+@@ -1744,3 +1772,4 @@
+     if (slice_iters == 0) {
+       cp_async_wait<0>();
++      if constexpr (awq_m16) __syncthreads();
+       bool last = slice_idx == slice_count - 1;
 diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 --- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 +++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
@@ -98,7 +113,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh 
      int group_size,
      int dev,
      cudaStream_t stream,
-@@ -698,16 +700,25 @@
+@@ -698,16 +700,34 @@
    if (thread_k != -1 && thread_n != -1) {
      thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
      exec_cfg = exec_config_t{1, thread_tfg};
@@ -112,6 +127,15 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh 
 +          {128, 64, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
 +          has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem / 4 - 1024)) {
 +    thread_tfg = thread_config_t{128, 64, 128};
++    exec_cfg = exec_config_t{4, thread_tfg};
++  } else if (
++      thread_m_blocks == 1 && !m_block_size_8 && num_experts == 32 && q_type == host::kU4 &&
++      group_size == 128 && !is_ep && !has_act_order && !is_zp_float && prob_m * top_k >= 320 &&
++      prob_m * top_k <= 384 && ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
++      is_valid_config(
++          {64, 128, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
++          has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem / 4 - 1024)) {
++    thread_tfg = thread_config_t{64, 128, 128};
 +    exec_cfg = exec_config_t{4, thread_tfg};
    } else {
      // Auto config
