@@ -57,7 +57,7 @@
 <body>
 <main>
   <h1>PD 分离的 Prefill 先推理模式</h1>
-  <p class="lead">Decode 仍然用 radix cache，命中的前缀不传。满匹配时也让 prefill 把预留的最后一个 token 传过来，首 token 挂在这最后一块上。不再走「不传页、decode 自己采样」。图中的 <code>PD_PF_PREFILL_REQ</code>、<code>PD_PF_PREFILL_KV_READY</code>、<code>PD_PF_DECODE_KV_READY</code> 只用于这个模式。PF 是 PREFILL_FIRST 的简写。</p>
+  <p class="lead">Decode 仍然用 radix cache，命中的前缀不传。满匹配时也让 prefill 把预留的最后一个 token 传过来，首 token 挂在这最后一块上。不再走「不传页、decode 自己采样」。最后一段被调度时就上报 prompt ids，forward 还在进行；Master 据此把请求下发给 decode 占页，和剩余计算并行。图中的 <code>PD_PF_PREFILL_REQ</code>、<code>PD_PF_PREFILL_PROMPT_IDS</code>、<code>PD_PF_DECODE_KV_READY</code> 只用于这个模式。PF 是 PREFILL_FIRST 的简写。</p>
 
   <div class="board">
     <svg viewBox="0 0 1000 980" role="img" aria-label="PD 分离的 Prefill 先推理模式时序">
@@ -86,26 +86,28 @@
 
       <!-- 2 -->
       <text class="n" x="28" y="168" fill="#57534e">2</text>
-      <rect x="430" y="140" width="130" height="52" rx="8" fill="#f0fdfa" stroke="#0f766e"/>
-      <text class="s" x="495" y="162" text-anchor="middle">encode 并算完</text>
-      <text class="s" x="495" y="180" text-anchor="middle">采样首 token，占住 KV</text>
+      <rect x="400" y="136" width="190" height="68" rx="8" fill="#f0fdfa" stroke="#0f766e"/>
+      <text class="s" x="495" y="158" text-anchor="middle">最后一段被调度</text>
+      <text class="s" x="495" y="176" text-anchor="middle">推理只发 shm_index、input_len</text>
+      <text class="s" x="495" y="194" text-anchor="middle">给本机 pd_report，仍在计算</text>
 
       <!-- 3 -->
-      <text class="n" x="28" y="236" fill="#57534e">3</text>
-      <line x1="485" y1="232" x2="155" y2="232" stroke="#0f766e" marker-end="url(#arrT)"/>
-      <text class="s" x="320" y="224" text-anchor="middle" fill="#0f766e">PD_PF_PREFILL_KV_READY</text>
-      <text class="s" x="320" y="252" text-anchor="middle" fill="#57534e">KV 已算完并占住，只带 prompt ids</text>
+      <text class="n" x="28" y="252" fill="#57534e">3</text>
+      <line x1="485" y1="248" x2="155" y2="248" stroke="#0f766e" marker-end="url(#arrT)"/>
+      <text class="s" x="320" y="240" text-anchor="middle" fill="#0f766e">PD_PF_PREFILL_PROMPT_IDS</text>
+      <text class="s" x="320" y="268" text-anchor="middle" fill="#57534e">pd_report 从共享内存读出 prompt ids</text>
 
       <!-- 4 -->
-      <text class="n" x="28" y="304" fill="#57534e">4</text>
-      <rect x="78" y="286" width="134" height="40" rx="8" fill="#f5f5f4" stroke="#a8a29e"/>
-      <text class="s" x="145" y="311" text-anchor="middle">首 token 可先返回</text>
+      <text class="n" x="28" y="320" fill="#57534e">4</text>
+      <line x1="145" y1="316" x2="835" y2="316" stroke="#1c1917" marker-end="url(#arr)"/>
+      <text class="s" x="490" y="308" text-anchor="middle">REQ</text>
+      <text class="s" x="490" y="336" text-anchor="middle" fill="#57534e">按负载选 decode，不带首 token</text>
 
       <!-- 5 -->
-      <text class="n" x="28" y="372" fill="#57534e">5</text>
-      <line x1="145" y1="368" x2="835" y2="368" stroke="#1c1917" marker-end="url(#arr)"/>
-      <text class="s" x="490" y="360" text-anchor="middle">REQ</text>
-      <text class="s" x="490" y="388" text-anchor="middle" fill="#57534e">按负载选 decode，不带首 token</text>
+      <text class="n" x="28" y="388" fill="#57534e">5</text>
+      <rect x="62" y="364" width="166" height="52" rx="8" fill="#f5f5f4" stroke="#a8a29e"/>
+      <text class="s" x="145" y="385" text-anchor="middle">首 token 可先返回</text>
+      <text class="s" x="145" y="403" text-anchor="middle">与 decode 占页并行</text>
 
       <!-- 6 -->
       <text class="n" x="28" y="452" fill="#57534e">6</text>
@@ -178,6 +180,12 @@
         <td>还没有这份请求</td>
       </tr>
       <tr>
+        <td>pd_report 读不到请求槽里的 prompt</td>
+        <td>收到 <code>PD_UPLOAD_GENERATE_ERROR</code> 后 <code>set_error</code>，不下发 decode</td>
+        <td>请求被 abort，放开还占着的 KV</td>
+        <td>还没有这份请求</td>
+      </tr>
+      <tr>
         <td>已经占住 KV，客户端断开、选不到 decode，或 master 放弃</td>
         <td>向 prefill 发 <code>ABORT</code>。已经发出 <code>REQ</code> 的 decode 也发</td>
         <td>请求标成 abort，下一轮放开 KV</td>
@@ -205,7 +213,7 @@
   </table>
 
   <h2>消息丢了，或某一侧已经不在</h2>
-  <p class="sec"><code>ABORT</code> 送不到时，prefill 由本节点 httpserver 等端点超时后自己 <code>abort</code>，decode 靠现有传输超时退出。会话进了失败之后，晚到的 <code>PD_PF_PREFILL_KV_READY</code>、<code>PD_PF_DECODE_KV_READY</code> 和 upkv 都丢掉。</p>
+  <p class="sec"><code>ABORT</code> 送不到时，prefill 由本节点 httpserver 等端点超时后自己 <code>abort</code>，decode 靠现有传输超时退出。会话进了失败之后，晚到的 <code>PD_PF_PREFILL_PROMPT_IDS</code>、<code>PD_PF_DECODE_KV_READY</code> 和 upkv 都丢掉。pd_report 读不到 prompt 时，经 <code>/pd_report</code> 上报 <code>PD_UPLOAD_GENERATE_ERROR</code>，Master 放进处理队列并 <code>set_error</code>，请求在下发 decode 之前结束。</p>
   <table>
     <thead>
       <tr><th>场景</th><th>谁还占着资源</th><th>怎么退出</th></tr>
