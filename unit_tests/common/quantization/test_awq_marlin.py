@@ -8,10 +8,19 @@ from lightllm.common.quantization.quantize_method import WeightPack
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("widths,tokens", [((192, 64, 64), 17), ((512, 256, 256), 128), ((512, 256, 256), 129)])
-def test_marlin_repacking_merged_awq_projection(dtype, widths, tokens):
+@pytest.mark.parametrize(
+    "height,widths,tokens",
+    [
+        (256, (192, 64, 64), 17),
+        (256, (512, 256, 256), 128),
+        (256, (512, 256, 256), 129),
+        (896, (1024, 256, 256), 16),
+        (896, (1024, 256, 256), 128),
+        (896, (1024, 256, 256), 129),
+    ],
+)
+def test_marlin_repacking_merged_awq_projection(dtype, height, widths, tokens):
     torch.manual_seed(12)
-    height = 256
     width = sum(widths)
     packed = torch.randint(-(2 ** 31), 2 ** 31 - 1, (height, width // 8), dtype=torch.int32, device="cuda")
     zeros = torch.randint_like(packed[: height // 128], -(2 ** 31), 2 ** 31 - 1)

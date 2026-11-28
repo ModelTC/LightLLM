@@ -29,6 +29,18 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh b/python/
        thread_tfg = exec_cfg.tb_cfg;
        if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
          max_thread_m_blocks--;
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
+@@ -358,5 +358,8 @@
+   if constexpr (!has_act_order && group_blocks != -1) {
++    if (prob_k == 896 && prob_n == 1536 && prob_m * parallel <= 128) {
++      iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++    }
+     if (group_blocks >= thread_k_blocks) {
+       // Ensure that the number of tiles in each stripe is a multiple of the
+       // groupsize; this avoids an annoying special case where a stripe starts
+       // in the middle of group.
 diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
 --- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
 +++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
