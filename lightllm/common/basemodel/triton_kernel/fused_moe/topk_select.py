@@ -136,17 +136,15 @@ def select_experts(
     custom_routing_function: Optional[Callable] = None,
 ):
     from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import fused_topk
-    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
+        get_group_score_used_topk_num,
+        triton_grouped_topk,
+    )
 
     # DeekSeekv2 uses grouped_top_k
     if use_grouped_topk:
         assert topk_group is not None
         assert num_expert_group is not None
-        group_score_topk_num = 1
-        # for deepseek v3
-        if topk_group == 4 and num_expert_group == 8 and top_k == 8:
-            group_score_topk_num = 2
-
         topk_weights, topk_ids = triton_grouped_topk(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -156,7 +154,7 @@ def select_experts(
             num_expert_group=num_expert_group,
             topk_group=topk_group,
             scoring_func=scoring_func,
-            group_score_used_topk_num=group_score_topk_num,
+            group_score_used_topk_num=get_group_score_used_topk_num(topk_group, num_expert_group, top_k),
         )
 
     elif custom_routing_function is None:
@@ -168,8 +166,7 @@ def select_experts(
             hidden_states=hidden_states, gating_output=router_logits, topk=top_k, renormalize=renormalize
         )
 
-    ######################################## warning ##################################################
-    # here is used to match autotune feature, make topk_ids more random
+    # Preserve the ordinary MoE autotune workload; EPLB uses its own selector.
     if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL):
         rand_gen = torch.Generator(device="cuda")
         rand_gen.manual_seed(router_logits.shape[0])

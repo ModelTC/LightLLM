@@ -78,6 +78,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
+        dist_group=None,
     ):
         assert shared_expert_func is None, "FuseMoeTriton does not support shared expert overlap"
         w13_weight, w13_scale = w13.weight, w13.weight_scale
