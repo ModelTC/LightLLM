@@ -109,7 +109,9 @@ def dense_awq_marlin(inputs, pack: WeightPack, out=None):
 
 
 @triton.jit
-def _align_eight_experts(ids, sorted_ids, expert_ids, padded, routes: tl.constexpr, lanes: tl.constexpr, block: tl.constexpr):
+def _align_eight_experts(
+    ids, sorted_ids, expert_ids, padded, routes: tl.constexpr, lanes: tl.constexpr, block: tl.constexpr
+):
     expert = tl.program_id(0)
     lane = tl.arange(0, lanes)
     assignments = tl.load(ids + lane, lane < routes, other=8)
@@ -151,7 +153,9 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
     padded = torch.empty(1, device=device, dtype=torch.int32)
     route_ids = route_ids.contiguous().to(torch.int32)
     if experts == 8 and topk == 2 and 16 <= tokens <= 512 and hidden == 2048 and intermediate == 768:
-        _align_eight_experts[(8,)](route_ids, sorted_ids, expert_ids, padded, routes, triton.next_power_of_2(routes), block)
+        _align_eight_experts[(8,)](
+            route_ids, sorted_ids, expert_ids, padded, routes, triton.next_power_of_2(routes), block
+        )
     else:
         cumsum = torch.empty(experts + 2, device=device, dtype=torch.int32)
         moe_align_block_size(route_ids, experts + 1, block, sorted_ids, expert_ids, padded, cumsum, True)
