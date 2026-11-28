@@ -37,7 +37,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
    int n_tiles = prob_n / 16 / thread_n_blocks;
    int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
 +  if constexpr (m_block_size_8) {
-+    if (prob_m * top_k <= 8) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++    if (prob_m * top_k <= 32) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
 +  }
 
    if constexpr (!has_act_order && group_blocks != -1) {
