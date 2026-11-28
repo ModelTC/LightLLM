@@ -21,6 +21,81 @@ class _IdentityPreInfer:
         return input
 
 
+def _postnorm_collector(monkeypatch):
+    monkeypatch.setattr(
+        hidden_collector_module,
+        "get_env_start_args",
+        lambda: SimpleNamespace(mtp_draft_model_dir=["/models/draft"]),
+    )
+    monkeypatch.setattr(
+        hidden_collector_module.PretrainedConfig,
+        "get_config_dict",
+        lambda _: ({"target_layer_ids": [0], "target_feature_sources": [0, "final_postnorm"]}, {}),
+    )
+    calls = []
+    weight = object()
+
+    def norm(hidden, infer_state, layer_weight):
+        assert layer_weight is weight
+        calls.append(hidden)
+        return hidden * 3
+
+    model = SimpleNamespace(
+        layers_num=2,
+        pre_infer=_IdentityPreInfer(),
+        post_infer=SimpleNamespace(_norm=norm),
+        pre_post_weight=weight,
+    )
+    return LayerHiddenCollector(model), calls
+
+
+def test_final_postnorm_feature_is_normalized_once_and_appended(monkeypatch):
+    prototype, calls = _postnorm_collector(monkeypatch)
+    first, second = prototype.new_instance(), prototype.new_instance()
+    state = SimpleNamespace(need_dp_prefill_balance=False)
+    for collector, value in [(first, 1.0), (second, 5.0)]:
+        intermediate = torch.full((2, 3), value)
+        final = torch.full((2, 3), value + 1)
+        collector.add(0, intermediate)
+        collector.add_final_hidden(final)
+        output = collector.finish_output(state).spec_hidden
+        torch.testing.assert_close(output, torch.cat([intermediate, final * 3], dim=-1))
+        assert collector.final_hidden is None
+        assert not collector.layer_hiddens
+    assert len(calls) == 2
+    assert prototype.final_hidden is None
+
+
+def test_missing_final_feature_fails_instead_of_silently_changing_projection(monkeypatch):
+    collector, _ = _postnorm_collector(monkeypatch)
+    collector.add(0, torch.ones(2, 3))
+    with pytest.raises(RuntimeError, match="final_postnorm"):
+        collector.finish_output(SimpleNamespace(need_dp_prefill_balance=False))
+
+
+def test_final_postnorm_feature_is_added_after_graph_state_restore(monkeypatch):
+    graph, _ = _postnorm_collector(monkeypatch)
+    layer_hidden = torch.ones(2, 3)
+    graph.add(0, layer_hidden)
+    monkeypatch.setattr(hidden_collector_module, "tensor_to_no_ref_tensor", torch.clone)
+    assert graph.release_graph_tensor_ownership() == (1, layer_hidden.numel() * layer_hidden.element_size())
+
+    infer_state = SimpleNamespace(need_dp_prefill_balance=False)
+    for value in (2.0, 4.0):
+        request = graph.new_instance()
+        request.restore_graph_state(graph)
+        final_hidden = torch.full_like(layer_hidden, value)
+        request.add_final_hidden(final_hidden)
+        output = request.finish_output(infer_state).spec_hidden
+
+        torch.testing.assert_close(output, torch.cat([layer_hidden, final_hidden * 3], dim=-1))
+        assert request.final_hidden is None
+        assert not request.layer_hiddens
+
+    assert graph.final_hidden is None
+    assert len(graph.layer_hiddens) == 1
+
+
 def _mock_target_layer_ids(monkeypatch, layer_ids):
     monkeypatch.setattr(
         hidden_collector_module,

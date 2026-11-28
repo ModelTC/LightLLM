@@ -95,3 +95,43 @@ Example Request
           "messages": [{"role": "user", "content": "Hello, introduce yourself in one sentence."}],
           "max_tokens": 128
         }'
+
+DFlash2 Speculative Decoding
+---------------------------
+
+DFlash2 generates candidate tokens with a draft model and verifies them with
+SenseNova-Loop. Download the matching target and draft checkpoints:
+
+.. code-block:: bash
+
+    hf download sensenova/SenseNova-Loop-9B \
+        --revision 3cc220e9c14bd7a74813c1299765e22147b1a3d5 \
+        --local-dir /path/to/SenseNova-Loop-9B
+    hf download sensenova/SenseNova-Loop-9B-DFlash2 \
+        --local-dir /path/to/SenseNova-Loop-9B-DFlash2
+
+The draft checkpoint is available at
+`SenseNova-Loop-9B-DFlash2 <https://huggingface.co/sensenova/SenseNova-Loop-9B-DFlash2>`_.
+The following example uses tensor parallelism across four GPUs,
+BF16 model loading, FP32 linear-attention state, and five draft tokens per
+verification round:
+
+.. code-block:: bash
+
+    MODEL_DIR=/path/to/SenseNova-Loop-9B \
+    DRAFT_MODEL_DIR=/path/to/SenseNova-Loop-9B-DFlash2 \
+    CUDA_VISIBLE_DEVICES=0,1,2,3 \
+    bash test/start_scripts/sensenova_loop/sensenova_loop_dflash2.sh
+
+``MODEL_DIR`` and ``DRAFT_MODEL_DIR`` select compatible target and draft model
+directories. Set ``DRY_RUN=1`` to print the launch command, ``METHOD=target`` to
+disable drafting, or ``MTP_STEP=7`` to propose seven draft tokens per round.
+``PYTHON`` selects the Python interpreter.
+
+The selected target layers, inclusion of the final normalized hidden state,
+and projection input width must match the draft checkpoint's training
+configuration. See
+:doc:`../references/draft_checkpoint_features` for ``target_feature_sources``.
+The launch script enables per-request acceptance statistics in ``normal``
+serving mode; see
+:doc:`../references/speculative_acceptance_metrics` for the response schema.

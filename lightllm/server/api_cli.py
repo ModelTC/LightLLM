@@ -903,6 +903,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Enable dynamic speculative scheduling.""",
     )
     parser.add_argument(
+        "--enable_spec_acceptance_metrics",
+        action="store_true",
+        help="Return request-level speculative acceptance histograms in final token details (normal mode only).",
+    )
+    parser.add_argument(
         "--kv_quant_calibration_config_path",
         type=str,
         default=None,

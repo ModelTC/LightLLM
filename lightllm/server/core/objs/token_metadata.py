@@ -26,8 +26,14 @@ class ReqFinalTokenMetadata:
         prompt_top_token_ids: Optional[np.ndarray] = None,
         prompt_top_logprobs: Optional[np.ndarray] = None,
         routed_experts: Optional[np.ndarray] = None,
+        spec_acceptance_metrics: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if prompt_top_token_ids is None and prompt_top_logprobs is None and routed_experts is None:
+        if (
+            prompt_top_token_ids is None
+            and prompt_top_logprobs is None
+            and routed_experts is None
+            and spec_acceptance_metrics is None
+        ):
             return
 
         has_token_ids = prompt_top_token_ids is not None
@@ -39,6 +45,7 @@ class ReqFinalTokenMetadata:
             "prompt_top_token_ids": prompt_top_token_ids,
             "prompt_top_logprobs": prompt_top_logprobs,
             "routed_experts": routed_experts,
+            "spec_acceptance_metrics": spec_acceptance_metrics,
         }
         blob = pickle.dumps(payload, protocol=pickle.HIGHEST_PROTOCOL)
         shm = create_or_link_shm(self._shm_name(), len(blob), force_mode="create")
@@ -58,6 +65,7 @@ class ReqFinalTokenMetadata:
         packed_prompt_ids = None
         packed_prompt_logprobs = None
         packed_routed = None
+        spec_acceptance_metrics = None
         shm = None
         try:
             shm = create_or_link_shm(self._shm_name(), -1, force_mode="link")
@@ -65,6 +73,7 @@ class ReqFinalTokenMetadata:
             packed_prompt_ids = payload.get("prompt_top_token_ids")
             packed_prompt_logprobs = payload.get("prompt_top_logprobs")
             packed_routed = payload.get("routed_experts")
+            spec_acceptance_metrics = payload.get("spec_acceptance_metrics")
         except BaseException as e:
             logger.warning(
                 f"Failed to read final token metadata shm for req "
@@ -83,6 +92,7 @@ class ReqFinalTokenMetadata:
                 packed_prompt_logprobs=packed_prompt_logprobs,
             ),
             "routed_experts": self._build_routed_experts_response(packed_routed),
+            "spec_acceptance_metrics": spec_acceptance_metrics,
         }
 
     def _build_prompt_logprobs_response(
