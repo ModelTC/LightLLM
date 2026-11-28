@@ -54,6 +54,34 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
 
    if constexpr (!has_act_order && group_blocks != -1) {
      if (group_blocks >= thread_k_blocks) {
+@@ -403,3 +406,11 @@
+-  int slice_row = (iters * blockIdx.x) % k_tiles;
+-  int slice_col_par = (iters * blockIdx.x) / k_tiles;
++  const bool balance_ctas = m_block_size_8 && thread_n_blocks == 4 && prob_m * top_k > 224;
++  const int total_tiles = n_tiles * parallel;
++  const int block_index = blockIdx.x;
++  const int grid_size = gridDim.x;
++  const int extra_tiles = total_tiles % grid_size;
++  const int cta_tiles = total_tiles / grid_size + (block_index < extra_tiles);
++  const int first_tile = block_index * (total_tiles / grid_size) + min(block_index, extra_tiles);
++  if (balance_ctas && cta_tiles == 0) return;
++  int slice_row = balance_ctas ? 0 : (iters * blockIdx.x) % k_tiles;
++  int slice_col_par = balance_ctas ? first_tile : (iters * blockIdx.x) / k_tiles;
+   int slice_col = slice_col_par;
+@@ -556,2 +567,13 @@
+   auto init_slice = [&](bool first_init = false) {
++    if (balance_ctas) {
++      slice_iters = slice_col_par < first_tile + cta_tiles ? k_tiles : 0;
++      slice_count = 1;
++      slice_idx = 0;
++      if (slice_iters && slice_col == n_tiles) {
++        slice_col = 0;
++        par_id++;
++        update_next_moe_block_data();
++      }
++      return;
++    }
+     slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
 diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 --- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 +++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
@@ -78,7 +106,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh 
      host::RuntimeCheck(prob_k % thread_k == 0, "prob_k = ", prob_k, " is not divisible by thread_k = ", thread_k);
 +  } else if (
 +      m_block_size_8 && num_experts == 32 && q_type == host::kU4 && group_size == 128 && !is_ep &&
-+      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 224 &&
++      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 288 &&
 +      ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
 +      is_valid_config(
 +          {128, 64, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
