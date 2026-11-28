@@ -3,6 +3,7 @@ from pathlib import Path
 
 import torch
 import triton
+import triton.language as tl
 
 from lightllm.common.quantization.quantize_method import WeightPack
 
@@ -107,6 +108,26 @@ def dense_awq_marlin(inputs, pack: WeightPack, out=None):
     return out
 
 
+@triton.jit
+def _align_eight_experts(ids, sorted_ids, expert_ids, padded, routes: tl.constexpr, lanes: tl.constexpr, block: tl.constexpr):
+    expert = tl.program_id(0)
+    lane = tl.arange(0, lanes)
+    assignments = tl.load(ids + lane, lane < routes, other=8)
+    counts = tl.histogram(assignments, 8)
+    rounded = tl.cdiv(counts, block) * block
+    expert_lane = tl.arange(0, 8)
+    start = tl.sum(tl.where(expert_lane < expert, rounded, 0), 0)
+    end = tl.sum(tl.where(expert_lane <= expert, rounded, 0), 0)
+    match = assignments == expert
+    rank = tl.cumsum(match.to(tl.int32))
+    count = tl.sum(match.to(tl.int32), 0)
+    tl.store(sorted_ids + start + rank - 1, lane, match)
+    tl.store(sorted_ids + start + count + lane, routes, lane < end - start - count)
+    tl.store(expert_ids + start // block + lane, expert, lane < (end - start) // block)
+    if expert == 0:
+        tl.store(padded, tl.sum(rounded, 0))
+
+
 def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, clamp_up_add_one):
     from sgl_kernel import moe_align_block_size, moe_sum_reduce, silu_and_mul
     from sgl_kernel.scalar_type import scalar_types
@@ -128,10 +149,12 @@ def moe_awq_marlin(inputs, gate, down, route_weights, route_ids, alpha, limit, c
     sorted_ids = torch.empty(maximum, device=device, dtype=torch.int32)
     expert_ids = torch.empty(triton.cdiv(maximum, block), device=device, dtype=torch.int32)
     padded = torch.empty(1, device=device, dtype=torch.int32)
-    cumsum = torch.empty(experts + 2, device=device, dtype=torch.int32)
-    moe_align_block_size(
-        route_ids.contiguous().to(torch.int32), experts + 1, block, sorted_ids, expert_ids, padded, cumsum, True
-    )
+    route_ids = route_ids.contiguous().to(torch.int32)
+    if experts == 8 and topk == 2 and 16 <= tokens <= 512 and hidden == 2048 and intermediate == 768:
+        _align_eight_experts[(8,)](route_ids, sorted_ids, expert_ids, padded, routes, triton.next_power_of_2(routes), block)
+    else:
+        cumsum = torch.empty(experts + 2, device=device, dtype=torch.int32)
+        moe_align_block_size(route_ids, experts + 1, block, sorted_ids, expert_ids, padded, cumsum, True)
     route_weights = route_weights.contiguous().to(torch.float32)
     empty_float = torch.empty(0, dtype=inputs.dtype, device=device)
     empty_int = torch.empty(0, dtype=torch.int32, device=device)
