@@ -363,7 +363,14 @@ class FusedMoeWeight(BaseWeightTpl):
         e_score_correction_bias_load_ok = (
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
-        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        loaded = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        if loaded and self.enable_ep_moe and get_env_start_args().ep_moe_backend == "megamoe":
+            from lightllm.common.basemodel.triton_kernel.fused_moe.sm90_fp8_mega_moe import (
+                prepare_sm90_mega_moe_weights,
+            )
+
+            prepare_sm90_mega_moe_weights(self.w13, self.w2)
+        return loaded
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
