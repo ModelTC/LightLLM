@@ -152,6 +152,17 @@ def test_04_pf_messages_do_not_reuse_old_handshake_values():
     assert ObjType.PD_PF_DECODE_KV_READY != ObjType.PD_REQ_DECODE_NODE_INFO
 
 
+def test_prefill_overlap_defaults_off_and_can_be_enabled():
+    from lightllm.server.api_cli import add_cli_args
+
+    assert StartArgs().enable_prefill_overlap is False
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)
+    assert parser.parse_args([]).enable_prefill_overlap is False
+    assert parser.parse_args(["--enable_prefill_overlap"]).enable_prefill_overlap is True
+    assert "lower time to first token" in parser.format_help()
+
+
 def test_05_schedule_interval_default_is_5ms_and_cli_help_is_english():
     from lightllm.server.api_cli import add_cli_args
 

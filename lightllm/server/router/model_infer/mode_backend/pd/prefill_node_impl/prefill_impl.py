@@ -6,6 +6,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -14,6 +15,7 @@ from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import
 class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
     def __init__(self, info_queue: mp.Queue) -> None:
         super().__init__()
+        self.support_overlap = get_env_start_args().enable_prefill_overlap
         self.info_queue: mp.Queue = info_queue
         self.classed_req_no_decode = True
         self.pd_prefill_chunked_handle_func = self._prefill_chuncked_handle_func

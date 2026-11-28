@@ -718,6 +718,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         " currently only for llama and qwen model, not support ep moe model",
     )
     parser.add_argument(
+        "--enable_prefill_overlap",
+        action="store_true",
+        help=(
+            "Overlap successive prefill steps on a prefill node. Disabled by default. "
+            "Leave it off when low concurrency needs a lower time to first token. "
+            "Decode and normal modes ignore this flag."
+        ),
+    )
+    parser.add_argument(
         "--prefill_cudagraph_max_handle_token",
         type=int,
         default=8192,
