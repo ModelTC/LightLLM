@@ -3,8 +3,6 @@ FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu22.04
 
 ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
-# GLM/DSV4 use the row-wise Top-K interface tested with vLLM 0.22.1.
-ARG VLLM_VERSION=0.22.1
 ARG NIXL_REF=v1.2.0
 # The independently buildable vLLM fork retains Hopper/DSV4 and supports out buffers.
 ARG FLASH_MLA_REPO=https://github.com/vllm-project/FlashMLA.git
@@ -54,10 +52,6 @@ WORKDIR /lightllm
 
 COPY ./requirements.txt /lightllm/requirements.txt
 RUN pip install -U pip
-RUN pip install --no-cache-dir \
-    -i https://pypi.org/simple \
-    --extra-index-url https://download.pytorch.org/whl/cu130 \
-    vllm==${VLLM_VERSION}
 RUN pip install -r /lightllm/requirements.txt --no-cache-dir \
     -i https://pypi.org/simple \
     --extra-index-url https://download.pytorch.org/whl/cu130
@@ -149,3 +143,33 @@ RUN if [ "${ENABLE_NIXL}" = "1" ]; then \
 
 COPY . /lightllm
 RUN pip install -e /lightllm --no-cache-dir
+
+ARG AWQ_MARLIN_REF=53318911cab4e721d62c4c7678caad79b251fcf3
+RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
+      set -e; \
+      mkdir /tmp/sglang-marlin && cd /tmp/sglang-marlin; \
+      git init -q; \
+      git fetch --depth=1 --filter=blob:none https://github.com/sgl-project/sglang.git "${AWQ_MARLIN_REF}"; \
+      git checkout FETCH_HEAD -- LICENSE python/sglang/jit_kernel/include \
+        python/sglang/jit_kernel/csrc/gemm/marlin python/sglang/jit_kernel/csrc/gemm/marlin_moe; \
+      git apply /lightllm/tools/awq_marlin_hopper.patch; \
+      python /lightllm/tools/build_awq_marlin.py \
+        /tmp/sglang-marlin/python/sglang/jit_kernel /opt/lightllm-marlin; \
+      cp LICENSE /opt/lightllm-marlin/LICENSE; \
+      cd / && rm -rf /tmp/sglang-marlin; \
+    fi
+
+ARG RAGGED_TOPK_REF=4f1fa3ad050c095825434436e65d65e037c23b1c
+RUN if [ "${TARGETPLATFORM}" = "linux/amd64" ]; then \
+      set -e; \
+      mkdir /tmp/sglang-topk && cd /tmp/sglang-topk; \
+      git init -q; \
+      git remote add origin https://github.com/sgl-project/sglang.git; \
+      git fetch --depth=1 --filter=blob:none origin "${RAGGED_TOPK_REF}"; \
+      git checkout FETCH_HEAD -- LICENSE python/sglang/kernels/jit/include \
+        python/sglang/kernels/jit/csrc/deepseek_v4/topk_v2.cuh; \
+      python /lightllm/tools/build_ragged_topk.py \
+        /tmp/sglang-topk/python/sglang/kernels/jit /opt/lightllm-topk; \
+      cp LICENSE /opt/lightllm-topk/LICENSE; \
+      cd / && rm -rf /tmp/sglang-topk; \
+    fi

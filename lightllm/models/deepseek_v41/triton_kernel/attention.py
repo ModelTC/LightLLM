@@ -6,6 +6,7 @@ import triton.language as tl
 from triton.language.extra import libdevice
 
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
+from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk
 
 
 @triton.jit
@@ -508,8 +509,6 @@ def _paged_topk_transform(
 
 
 def select_indexer_candidates(logits, lengths, indices):
-    from lightllm.utils.vllm_utils import vllm_ops
-
     topk = indices.shape[1]
     scores = torch.empty((logits.shape[0], triton.cdiv(logits.shape[1], 8)), dtype=torch.float32, device=logits.device)
     # Rows that fit are written directly by _sort_candidates. Report zero valid
@@ -525,16 +524,8 @@ def select_indexer_candidates(logits, lengths, indices):
         topk,
         128,
     )
-    vllm_ops.top_k_per_row_decode(
-        scores,
-        1,
-        topk_lengths,
-        indices,
-        scores.shape[0],
-        scores.stride(0),
-        1,
-        topk,
-    )
+    if scores.shape[1] > topk:
+        ragged_topk(scores, topk_lengths, indices)
     _sort_candidates[(logits.shape[0],)](
         indices,
         lengths,
@@ -544,20 +535,11 @@ def select_indexer_candidates(logits, lengths, indices):
 
 
 def select_paged_topk(logits, lengths, pages, slots, selected_lengths, candidate_blocks=None, *, page_rows=None):
-    from lightllm.utils.vllm_utils import vllm_ops
-
     raw = torch.empty_like(slots)
     topk = slots.shape[1]
-    vllm_ops.top_k_per_row_decode(
-        logits,
-        1,
-        lengths if candidate_blocks is None else lengths.clamp_max(logits.shape[1]),
-        raw,
-        logits.shape[0],
-        logits.stride(0),
-        1,
-        topk,
-    )
+    if logits.shape[1] > topk:
+        valid_lengths = lengths if candidate_blocks is None else lengths.clamp_max(logits.shape[1])
+        ragged_topk(logits, valid_lengths, raw)
     _paged_topk_transform[(logits.shape[0],)](
         logits,
         raw,

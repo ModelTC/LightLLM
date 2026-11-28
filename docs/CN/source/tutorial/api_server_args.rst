@@ -664,10 +664,10 @@ PD 分离模式参数
          - 实现 backend
        * - ``w8a8``
          - INT8 W8A8；W：per-channel，A：per-token
-         - vLLM
+         - SGL 或 Triton
        * - ``fp8w8a8``
          - FP8 W8A8；W：per-channel，A：per-token
-         - vLLM
+         - SGL 或 Triton
        * - ``fp8w8a8-pt``
          - FP8 W8A8；W：per-tensor，A：per-token
          - Triton
@@ -682,22 +682,22 @@ PD 分离模式参数
          - Triton
        * - ``awq``
          - INT4 weight-only；group size 由 checkpoint 提供
-         - vLLM
+         - Hopper 上兼容的权重使用独立 Marlin 算子，其余使用 Triton 或 SGL 反量化加 PyTorch 矩阵乘法
        * - ``awq_marlin``
-         - INT4 weight-only；group size 由 checkpoint 提供
-         - vLLM
+         - ``awq`` 的旧别名
+         - 同 ``awq``
        * - ``none``
          - 不量化
          - -
        * - ``w8a8-vllm``
-         - INT8 W8A8；W：per-channel，A：per-token
-         - vLLM
+         - ``w8a8`` 的旧别名
+         - SGL 或 Triton
        * - ``fp8w8a8-vllm``
-         - FP8 W8A8；W：per-channel，A：per-token
-         - vLLM
+         - ``fp8w8a8`` 的旧别名
+         - SGL 或 Triton
        * - ``fp8w8a8-pt-vllm``
          - FP8 W8A8；W：per-tensor，A：per-token
-         - vLLM
+         - SGL 或 Triton
        * - ``fp8w8a8-pt-sgl``
          - FP8 W8A8；W：per-tensor，A：per-token
          - SGL
@@ -706,7 +706,7 @@ PD 分离模式参数
          - Triton
        * - ``fp8w8a8-b128-vllm``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
-         - vLLM
+         - Hopper 上符合形状要求时使用 DeepGEMM，其余使用 Triton
        * - ``fp8w8a8-b128-deepgemm``
          - FP8 W8A8；W：per-block 128×128，A：per-token-group 128
          - DeepGEMM

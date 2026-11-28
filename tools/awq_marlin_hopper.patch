@@ -1,0 +1,166 @@
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin/gptq_marlin.cuh
+@@ -442,13 +442,15 @@ exec_config_t determine_exec_config(
+     bool has_zp,
+     bool is_zp_float,
+     int max_shared_mem,
+-    int sms) {
++    int sms,
++    bool prefer_n64) {
+   exec_config_t exec_cfg = exec_config_t{1, thread_config_t{-1, -1, -1}};
+   thread_config_t* thread_configs = thread_m_blocks > 1 ? large_batch_thread_configs : small_batch_thread_configs;
+   int thread_configs_size = thread_m_blocks > 1 ? sizeof(large_batch_thread_configs) / sizeof(thread_config_t)
+                                                 : sizeof(small_batch_thread_configs) / sizeof(thread_config_t);
+
++  const int start = prefer_n64 ? thread_configs_size - 1 : 0;
+   for (int i = 0; i < thread_configs_size; i++) {
+-    thread_config_t th_config = thread_configs[i];
++    thread_config_t th_config = thread_configs[(i + start) % thread_configs_size];
+
+     if (!is_valid_config(
+@@ -647,7 +649,8 @@ void marlin_mm(
+           has_zp,
+           is_zp_float,
+           max_shared_mem,
+-          sms);
++          sms,
++          prob_m <= 128 && prob_n >= 1024 && prob_n <= 5120);
+       thread_tfg = exec_cfg.tb_cfg;
+       if (thread_tfg.thread_k == -1 && max_thread_m_blocks > 1) {
+         max_thread_m_blocks--;
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin/marlin_template.h
+@@ -358,5 +358,8 @@
+   if constexpr (!has_act_order && group_blocks != -1) {
++    if (prob_k == 896 && prob_n == 1536 && prob_m * parallel <= 128) {
++      iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++    }
+     if (group_blocks >= thread_k_blocks) {
+       // Ensure that the number of tiles in each stripe is a multiple of the
+       // groupsize; this avoids an annoying special case where a stripe starts
+       // in the middle of group.
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h
+@@ -390,6 +390,15 @@
+   int k_tiles = prob_k / 16 / thread_k_blocks;
+   int n_tiles = prob_n / 16 / thread_n_blocks;
+   int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
++  constexpr bool awq_m16 =
++      thread_m_blocks == 1 && !m_block_size_8 && thread_n_blocks == 8 && thread_k_blocks == 4 &&
++      w_type == host::kU4 && group_blocks == 8 && !is_zp_float;
++  constexpr bool awq_group_reuse = w_type == host::kU4 && group_blocks > thread_k_blocks && !is_zp_float;
++  if constexpr (m_block_size_8) {
++    if (thread_n_blocks == 4 || prob_m * top_k <= 32) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++  } else if constexpr (awq_m16) {
++    iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++  }
+
+   if constexpr (!has_act_order && group_blocks != -1) {
+     if (group_blocks >= thread_k_blocks) {
+@@ -403,3 +412,11 @@
+-  int slice_row = (iters * blockIdx.x) % k_tiles;
+-  int slice_col_par = (iters * blockIdx.x) / k_tiles;
++  const bool balance_ctas = m_block_size_8 && thread_n_blocks == 4 && prob_m * top_k > 224;
++  const int total_tiles = n_tiles * parallel;
++  const int block_index = blockIdx.x;
++  const int grid_size = gridDim.x;
++  const int extra_tiles = total_tiles % grid_size;
++  const int cta_tiles = total_tiles / grid_size + (block_index < extra_tiles);
++  const int first_tile = block_index * (total_tiles / grid_size) + min(block_index, extra_tiles);
++  if (balance_ctas && cta_tiles == 0) return;
++  int slice_row = balance_ctas ? 0 : (iters * blockIdx.x) % k_tiles;
++  int slice_col_par = balance_ctas ? first_tile : (iters * blockIdx.x) / k_tiles;
+   int slice_col = slice_col_par;
+@@ -556,2 +573,13 @@
+   auto init_slice = [&](bool first_init = false) {
++    if (balance_ctas) {
++      slice_iters = slice_col_par < first_tile + cta_tiles ? k_tiles : 0;
++      slice_count = 1;
++      slice_idx = 0;
++      if (slice_iters && slice_col == n_tiles) {
++        slice_col = 0;
++        par_id++;
++        update_next_moe_block_data();
++      }
++      return;
++    }
+     slice_iters = iters * (blockIdx.x + 1) - (k_tiles * slice_col_par + slice_row);
+@@ -1701,3 +1729,4 @@
+                           : (pipe + (stage_group_id + 1) * stages - 1);
++            if constexpr (awq_group_reuse) __syncthreads();
+             fetch_to_shared((pipe + stages - 1) % stages, pipe, slice_iters >= stages, idx);
+             pipe++;
+@@ -1744,3 +1773,4 @@
+     if (slice_iters == 0) {
+       cp_async_wait<0>();
++      if constexpr (awq_group_reuse) __syncthreads();
+       bool last = slice_idx == slice_count - 1;
+diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
+--- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
++++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
+@@ -452,3 +452,4 @@
++  _GET_IF(host::kU4, 1, 4, 8, true, 8, 128, false)
+   COMMON_GET_IF(host::kU4)
+   COMMON_GET_IF(host::kU4B8)
+   COMMON_GET_IF(host::kU8B128)
+@@ -593,6 +594,7 @@
+     bool is_k_full,
+     bool has_zp,
+     int num_groups,
++    int num_experts,
+     int group_size,
+     int dev,
+     cudaStream_t stream,
+@@ -698,16 +700,34 @@
+   if (thread_k != -1 && thread_n != -1) {
+     thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
+     exec_cfg = exec_config_t{1, thread_tfg};
+     host::RuntimeCheck(prob_n % thread_n == 0, "prob_n = ", prob_n, " is not divisible by thread_n = ", thread_n);
+     host::RuntimeCheck(prob_k % thread_k == 0, "prob_k = ", prob_k, " is not divisible by thread_k = ", thread_k);
++  } else if (
++      m_block_size_8 && num_experts == 32 && q_type == host::kU4 && group_size == 128 && !is_ep &&
++      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 288 &&
++      ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
++      is_valid_config(
++          {128, 64, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
++          has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem / 4 - 1024)) {
++    thread_tfg = thread_config_t{128, 64, 128};
++    exec_cfg = exec_config_t{4, thread_tfg};
++  } else if (
++      thread_m_blocks == 1 && !m_block_size_8 && num_experts == 32 && q_type == host::kU4 &&
++      group_size == 128 && !is_ep && !has_act_order && !is_zp_float && prob_m * top_k >= 320 &&
++      prob_m * top_k <= 384 && ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
++      is_valid_config(
++          {64, 128, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
++          has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem / 4 - 1024)) {
++    thread_tfg = thread_config_t{64, 128, 128};
++    exec_cfg = exec_config_t{4, thread_tfg};
+   } else {
+     // Auto config
+     exec_cfg = determine_exec_config<scalar_t>(
+         q_type,
+         prob_m,
+         prob_n,
+         prob_k,
+         thread_m_blocks,
+         m_block_size_8,
+         num_bits,
+         group_size,
+@@ -722,5 +733,5 @@
+   int num_threads = thread_tfg.num_threads;
+   thread_k = thread_tfg.thread_k;
+   thread_n = thread_tfg.thread_n;
+-  int blocks = sms * exec_cfg.blocks_per_sm;
++  int blocks = m_block_size_8 && thread_n != 64 ? sms : sms * exec_cfg.blocks_per_sm;
+   if (exec_cfg.blocks_per_sm > 1) max_shared_mem = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
+@@ -1086,6 +1097,7 @@
+       has_act_order,
+       is_k_full,
+       has_zp,
+       static_cast<int>(num_groups),
++      static_cast<int>(b_q_weight.size(0)),
+       static_cast<int>(group_size),
+       dev,

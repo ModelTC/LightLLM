@@ -2,7 +2,7 @@ from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 import triton
 
-from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk
 
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
 from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
@@ -21,25 +21,7 @@ class Glm5NextNsaInfer:
 
     def select_topk_indices(self, logits, q_pool_seq_len, topk_pool_indices):
         """Select row-relative indices, with valid entries before -1 padding."""
-        if HAS_VLLM and hasattr(vllm_ops, "top_k_per_row_decode"):
-            # next_n=1 treats each query as an independent row, including prefill.
-            # The decode entry splits long rows before merging their candidates.
-            # Tested with vLLM 0.22.1; persistent_topk can drop candidates (#51782).
-            vllm_ops.top_k_per_row_decode(
-                logits,
-                1,
-                q_pool_seq_len,
-                topk_pool_indices,
-                logits.shape[0],
-                logits.stride(0),
-                logits.stride(1),
-                topk_pool_indices.shape[1],
-            )
-        else:
-            pool_positions = torch.arange(logits.shape[1], device=logits.device)
-            logits.masked_fill_(pool_positions[None, :] >= q_pool_seq_len[:, None], -float("inf"))
-            selected = torch.topk(logits, topk_pool_indices.shape[1], dim=-1, sorted=True).indices
-            topk_pool_indices.copy_(selected.masked_fill(selected >= q_pool_seq_len[:, None], -1))
+        ragged_topk(logits, q_pool_seq_len, topk_pool_indices)
 
     def write_k_pools(self, hidden_states, infer_state, att_state, layer_weight):
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.rms_norm_eps)

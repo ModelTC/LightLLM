@@ -1,9 +1,11 @@
+import builtins
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.models.glm5_next.indexer import HAS_VLLM, Glm5NextNsaInfer
+from lightllm.common.basemodel.triton_kernel.ragged_topk import _load_exact_topk, try_exact_topk
+from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -14,11 +16,6 @@ def indexer():
     return Glm5NextNsaInfer(
         0, {"index_topk": 2048, "index_n_heads": 32, "index_head_dim": 128, "rms_norm_eps": 1e-5, "index_kpool": 4}, 1
     )
-
-
-def _require_vllm_topk():
-    if not HAS_VLLM:
-        pytest.skip("vLLM top_k_per_row_decode required")
 
 
 def _assert_topk(logits, lengths, indices):
@@ -41,7 +38,6 @@ def _assert_topk(logits, lengths, indices):
 @pytest.mark.parametrize("pools", [640, 8192, 65536, 262144])
 @pytest.mark.parametrize("distribution", ["normal", "concentrated", "ties"])
 def test_topk_variable_lengths(indexer, pools, distribution):
-    _require_vllm_topk()
     torch.manual_seed(42)
     # DeepGEMM logits can have a padded row stride, and output is a query chunk.
     logits = torch.randn(8, pools + 128, device="cuda")[:, :pools]
@@ -61,7 +57,6 @@ def test_topk_variable_lengths(indexer, pools, distribution):
 
 @pytest.mark.parametrize("pools", [8192, 262144])
 def test_topk_cuda_graph_with_changing_lengths(indexer, pools):
-    _require_vllm_topk()
     logits = torch.zeros(8, pools, device="cuda")
     lengths = torch.zeros(8, device="cuda", dtype=torch.int32)
     indices = torch.empty(8, 512, device="cuda", dtype=torch.int32)
@@ -86,10 +81,25 @@ def test_topk_cuda_graph_with_changing_lengths(indexer, pools):
         _assert_topk(logits, lengths, indices)
 
 
-def test_topk_without_vllm(indexer, monkeypatch):
-    from lightllm.models.glm5_next import indexer as indexer_module
+@pytest.mark.parametrize("pools", [4096, 32768])
+def test_topk_without_flashinfer(indexer, monkeypatch, pools):
+    original_import = builtins.__import__
 
-    monkeypatch.setattr(indexer_module, "HAS_VLLM", False)
+    def import_without_flashinfer(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "flashinfer" and "top_k_ragged_transform" in fromlist:
+            raise ImportError("FlashInfer unavailable")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_flashinfer)
+    monkeypatch.setattr("lightllm.common.basemodel.triton_kernel.ragged_topk._load_exact_topk", lambda: None)
+    logits = torch.randint(0, 8, (4, pools + 128), device="cuda").float()[:, :pools]
+    lengths = torch.tensor([0, 511, pools // 2, pools - 1], device="cuda", dtype=torch.int32)
+    indices = torch.empty(4, 512, device="cuda", dtype=torch.int32)
+    indexer.select_topk_indices(logits, lengths, indices)
+    _assert_topk(logits, lengths, indices)
+
+
+def test_topk_with_empty_row(indexer):
     logits = torch.randn(5, 640, device="cuda")
     lengths = torch.tensor([0, 1, 511, 512, 639], device="cuda", dtype=torch.int32)
     indices = torch.empty(5, 512, device="cuda", dtype=torch.int32)
@@ -97,11 +107,45 @@ def test_topk_without_vllm(indexer, monkeypatch):
     _assert_topk(logits, lengths, indices)
 
 
+@pytest.mark.parametrize("width", [0, 127, 512])
+def test_topk_when_row_width_fits(indexer, width):
+    logits = torch.empty((4, width), device="cuda")
+    lengths = torch.tensor([0, 1, width, width + 1], device="cuda", dtype=torch.int32)
+    output = torch.full((4, 1024), -2, device="cuda", dtype=torch.int32)
+    indices = output[:, ::2]
+    indexer.select_topk_indices(logits, lengths, indices)
+    positions = torch.arange(512, device="cuda", dtype=torch.int32)[None, :]
+    expected = torch.where(positions < lengths[:, None].clamp_max(width), positions, -1)
+    torch.testing.assert_close(indices, expected)
+    assert (output[:, 1::2] == -2).all()
+
+
+@pytest.mark.parametrize("width", [4096, 8192, 12288, 16384])
+def test_topk_2048_with_concentrated_candidates(indexer, width):
+    logits = torch.linspace(1.0, 1.01, width, device="cuda").repeat(2, 1)
+    lengths = torch.tensor([width, 1023], device="cuda", dtype=torch.int32)
+    indices = torch.empty(2, 2048, device="cuda", dtype=torch.int32)
+    indexer.select_topk_indices(logits, lengths, indices)
+    _assert_topk(logits, lengths, indices)
+
+
+def test_standalone_topk_excludes_invalid_nan_and_keeps_valid_negative_inf():
+    if torch.cuda.get_device_capability() != (9, 0) or _load_exact_topk() is None:
+        pytest.skip("Standalone Hopper Top-K is unavailable")
+
+    logits = torch.full((2, 8192), -torch.inf, device="cuda")
+    logits[:, :17] = 1
+    lengths = torch.tensor([8189, 127], device="cuda", dtype=torch.int32)
+    logits.masked_fill_(torch.arange(8192, device="cuda")[None, :] >= lengths[:, None], torch.nan)
+    indices = torch.empty(2, 512, device="cuda", dtype=torch.int32)
+    assert try_exact_topk(logits, lengths, indices)
+    _assert_topk(logits, lengths, indices)
+
+
 @pytest.mark.parametrize("mtp_size", [1, 3, 6])
 @pytest.mark.parametrize("max_pools", [1024, 262144])
 def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, max_pools):
     pytest.importorskip("deep_gemm")
-    _require_vllm_topk()
     torch.manual_seed(27)
     rows = 5 * mtp_size
     storage = torch.empty(1024, 1, 584, device="cuda", dtype=torch.bfloat16)

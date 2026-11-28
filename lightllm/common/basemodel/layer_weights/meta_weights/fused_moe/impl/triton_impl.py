@@ -84,8 +84,31 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn
 
-        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
+        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import (
+            fused_experts,
+            fused_experts_impl,
+        )
 
+        if self.quant_method.method_name == "awq":
+            from lightllm.common.quantization.awq_marlin import is_marlin_packed, moe_awq_marlin
+
+            if is_marlin_packed(w13):
+                return moe_awq_marlin(input_tensor, w13, w2, topk_weights, topk_ids, alpha, limit, clamp_up_add_one)
+            return fused_experts_impl(
+                hidden_states=input_tensor,
+                w1=w13_weight,
+                w2=w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                inplace=True,
+                w1_scale=w13_scale,
+                w2_scale=w2_scale,
+                w1_zeros=w13.weight_zero_point,
+                w2_zeros=w2.weight_zero_point,
+                alpha=alpha,
+                limit=limit,
+                clamp_up_add_one=clamp_up_add_one,
+            )
         fused_experts(
             hidden_states=input_tensor,
             w1=w13_weight,

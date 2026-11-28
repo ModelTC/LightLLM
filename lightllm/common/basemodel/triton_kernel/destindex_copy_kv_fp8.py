@@ -107,7 +107,6 @@ def destindex_copy_kv_fp8(KV, DestLoc, scales, Out, is_per_tensor_quant=False, O
 
 if __name__ == "__main__":
     import torch.nn.functional as F
-    from lightllm.utils.vllm_utils import vllm_ops
 
     B, N_CTX, H, HEAD_DIM = 32, 1024, 16, 128
     dtype = torch.bfloat16

@@ -5,8 +5,8 @@ import torch
 import triton
 import triton.language as tl
 
-from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
+from lightllm.common.basemodel.triton_kernel.ragged_topk import ragged_topk, try_exact_topk, use_page_table_topk
 
 
 @triton.jit
@@ -106,9 +106,10 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
     scores: FP32 [T, width] with contiguous columns; valid_lengths: int32 [T].
     page_table and outputs use int32, with contiguous output entries per query.
     Dense rows use a Triton page transform. Tiny short-row batches fuse
-    pairwise rank selection and page mapping; larger short batches use
-    FlashInfer. For long rows vLLM selects each valid prefix and Triton
-    translates its int32 output in place. Output ordering is unspecified and padding is -1.
+    pairwise rank selection and page mapping. The standalone SGLang kernel
+    and FlashInfer fuse selection and mapping for supported shapes. The
+    remaining shapes select ragged Top-K indices before mapping them with
+    Triton. Output ordering is unspecified and padding is -1.
     """
     if scores.shape[0] == 0:
         return
@@ -151,17 +152,24 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
             num_stages=1,
             **get_pdl_launch_kwargs(scores.device),
         )
-    elif scores.shape[1] > 2048 or topk != 512:
-        vllm_ops.top_k_per_row_decode(
+    elif try_exact_topk(scores, valid_lengths, compressed_kv_indices, page_table, page_size, out_logical_indices):
+        return
+    elif (
+        use_page_table_topk(scores, topk) and logical_indices.is_contiguous() and compressed_kv_indices.is_contiguous()
+    ):
+        from flashinfer import top_k_page_table_transform
+
+        top_k_page_table_transform(
             scores,
-            1,
+            page_table,
             valid_lengths,
-            logical_indices,
-            scores.shape[0],
-            scores.stride(0),
-            scores.stride(1),
             topk,
+            page_size=page_size,
+            out=compressed_kv_indices,
+            out_raw_indices=out_logical_indices,
         )
+    elif scores.shape[1] > 2048 or topk != 512:
+        ragged_topk(scores, valid_lengths, logical_indices)
         _indexer_topk_to_kv_indices_kernel[(scores.shape[0],)](
             logical_indices,
             page_table,

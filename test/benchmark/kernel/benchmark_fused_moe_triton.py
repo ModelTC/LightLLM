@@ -84,7 +84,6 @@ def fused_moe_lightllm_api(
     a2_scale=None,
     block_shape=None,
 ):
-
     topk_weights, topk_ids = select_experts(
         hidden_states=x,
         router_logits=input_gating,
@@ -109,54 +108,6 @@ def fused_moe_lightllm_api(
         w1_scale=w1_scale,
         w2_scale=w2_scale,
     )
-
-
-def fused_moe_vllm_api(
-    x,
-    w1,
-    w2,
-    input_gating,
-    topk,
-    use_fp8_w8a8=False,
-    w1_scale=None,
-    w2_scale=None,
-    a1_scale=None,
-    a2_scale=None,
-    block_shape=None,
-):
-    from vllm.model_executor.layers.fused_moe.fused_moe import fused_moe as fused_moe_vllm
-
-    if block_shape is not None:
-        return fused_moe_vllm(
-            x,
-            w1,
-            w2,
-            input_gating,
-            topk,
-            renormalize=True,
-            inplace=True,
-            use_fp8_w8a8=use_fp8_w8a8,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-            block_shape=block_shape,
-        )
-    else:
-        return fused_moe_vllm(
-            x,
-            w1,
-            w2,
-            input_gating,
-            topk,
-            renormalize=True,
-            inplace=True,
-            use_fp8_w8a8=use_fp8_w8a8,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-        )
 
 
 def fused_moe_sglang_api(
@@ -196,23 +147,17 @@ def fused_moe_sglang_api(
     )
 
 
+PROVIDERS = ["sglang_fused_moe_triton", "lightllm_fused_moe_triton"]
+
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size"],
         x_vals=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192],
         line_arg="provider",
-        line_vals=[
-            "vllm_fused_moe_triton",
-            "sglang_fused_moe_triton",
-            "lightllm_fused_moe_triton",
-        ],
-        line_names=[
-            "vllm_fused_moe_triton",
-            "sglang_fused_moe_triton",
-            "lightllm_fused_moe_triton",
-        ],
+        line_vals=PROVIDERS,
+        line_names=PROVIDERS,
         styles=[
-            ("blue", "-"),
             ("green", "-"),
             ("red", "-"),
         ],
@@ -263,13 +208,7 @@ def benchmark(batch_size, provider, model_config, use_fp8=False, use_cuda_graph=
     input_gating = torch.randn(num_tokens, num_experts, dtype=torch.float32)
 
     # Warmup
-    api_func = (
-        fused_moe_vllm_api
-        if provider == "vllm_fused_moe_triton"
-        else fused_moe_lightllm_api
-        if provider == "lightllm_fused_moe_triton"
-        else fused_moe_sglang_api
-    )
+    api_func = fused_moe_lightllm_api if provider == "lightllm_fused_moe_triton" else fused_moe_sglang_api
     for _ in range(10):
         api_func(
             x,
