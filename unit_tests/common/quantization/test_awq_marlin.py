@@ -46,7 +46,22 @@ def test_marlin_repacking_merged_awq_projection(dtype, height, widths, tokens):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize(
-    "tokens,experts", [(1, 8), (16, 8), (8, 32), (48, 8), (64, 32), (95, 8), (96, 8), (128, 8), (128, 32)]
+    "tokens,experts",
+    [
+        (1, 8),
+        (16, 8),
+        (8, 32),
+        (9, 32),
+        (48, 8),
+        (48, 32),
+        (64, 32),
+        (95, 8),
+        (96, 8),
+        (96, 32),
+        (97, 32),
+        (128, 8),
+        (128, 32),
+    ],
 )
 def test_moe_marlin_awq_reduction(dtype, tokens, experts):
     torch.manual_seed(12)
@@ -97,7 +112,7 @@ def test_moe_marlin_awq_reduction(dtype, tokens, experts):
             graph.replay()
             assert torch.equal(replayed, actual)
 
-    if tokens in (1, 8, 16, 48, 64):
+    if tokens in (1, 8, 9, 16, 48, 64, 96, 97):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             replayed = moe_awq_marlin(inputs.clone(), gate, down, scores, ids, None, None, False)

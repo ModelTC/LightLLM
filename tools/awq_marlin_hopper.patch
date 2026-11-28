@@ -49,7 +49,7 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
    int n_tiles = prob_n / 16 / thread_n_blocks;
    int iters = div_ceil(k_tiles * n_tiles * parallel, gridDim.x);
 +  if constexpr (m_block_size_8) {
-+    if (prob_m * top_k <= 32) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
++    if (thread_n_blocks == 4 || prob_m * top_k <= 32) iters = k_tiles * div_ceil(n_tiles * parallel, gridDim.x);
 +  }
 
    if constexpr (!has_act_order && group_blocks != -1) {
@@ -57,10 +57,57 @@ diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/marlin_template.h b/p
 diff --git a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 --- a/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
 +++ b/python/sglang/jit_kernel/csrc/gemm/marlin_moe/moe_wna16_marlin.cuh
-@@ -722,5 +722,5 @@
+@@ -452,3 +452,4 @@
++  _GET_IF(host::kU4, 1, 4, 8, true, 8, 128, false)
+   COMMON_GET_IF(host::kU4)
+   COMMON_GET_IF(host::kU4B8)
+   COMMON_GET_IF(host::kU8B128)
+@@ -593,6 +594,7 @@
+     bool is_k_full,
+     bool has_zp,
+     int num_groups,
++    int num_experts,
+     int group_size,
+     int dev,
+     cudaStream_t stream,
+@@ -698,16 +700,25 @@
+   if (thread_k != -1 && thread_n != -1) {
+     thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
+     exec_cfg = exec_config_t{1, thread_tfg};
+     host::RuntimeCheck(prob_n % thread_n == 0, "prob_n = ", prob_n, " is not divisible by thread_n = ", thread_n);
+     host::RuntimeCheck(prob_k % thread_k == 0, "prob_k = ", prob_k, " is not divisible by thread_k = ", thread_k);
++  } else if (
++      m_block_size_8 && num_experts == 32 && q_type == host::kU4 && group_size == 128 && !is_ep &&
++      !has_act_order && !is_zp_float && prob_m * top_k > 16 && prob_m * top_k <= 192 &&
++      ((prob_k == 2048 && prob_n == 1536) || (prob_k == 768 && prob_n == 2048)) &&
++      is_valid_config(
++          {128, 64, 128}, m_block_size_8, thread_m_blocks, prob_m, prob_n, prob_k, num_bits, group_size,
++          has_act_order, is_k_full, has_zp, is_zp_float, max_shared_mem / 4 - 1024)) {
++    thread_tfg = thread_config_t{128, 64, 128};
++    exec_cfg = exec_config_t{4, thread_tfg};
+   } else {
+     // Auto config
+     exec_cfg = determine_exec_config<scalar_t>(
+         q_type,
+         prob_m,
+         prob_n,
+         prob_k,
+         thread_m_blocks,
+         m_block_size_8,
+         num_bits,
+         group_size,
+@@ -722,5 +733,5 @@
    int num_threads = thread_tfg.num_threads;
    thread_k = thread_tfg.thread_k;
    thread_n = thread_tfg.thread_n;
 -  int blocks = sms * exec_cfg.blocks_per_sm;
-+  int blocks = m_block_size_8 ? sms : sms * exec_cfg.blocks_per_sm;
++  int blocks = m_block_size_8 && thread_n != 64 ? sms : sms * exec_cfg.blocks_per_sm;
    if (exec_cfg.blocks_per_sm > 1) max_shared_mem = max_shared_mem / exec_cfg.blocks_per_sm - 1024;
+@@ -1086,6 +1097,7 @@
+       has_act_order,
+       is_k_full,
+       has_zp,
+       static_cast<int>(num_groups),
++      static_cast<int>(b_q_weight.size(0)),
+       static_cast<int>(group_size),
+       dev,
